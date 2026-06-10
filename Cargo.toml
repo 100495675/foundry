@@ -1,0 +1,3 @@
+[workspace]
+members = ["foundry", "foundry-macros", "foundry-build", "foundry-internal"]
+resolver = "2"

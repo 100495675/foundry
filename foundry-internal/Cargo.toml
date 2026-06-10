@@ -1,0 +1,5 @@
+[package]
+name = "foundry-internal"
+version = "1.0.0"
+edition = "2021"
+description = "Tipos privados de control interno para el ecosistema foundry"
