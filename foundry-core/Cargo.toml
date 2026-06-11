@@ -1,0 +1,7 @@
+[package]
+name = "foundry-core"
+version = "1.0.0"
+edition = "2021"
+description = "Tipos compartidos del ecosistema foundry"
+
+[dependencies]

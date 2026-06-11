@@ -1,8 +1,6 @@
-use crate::internal::Pattern;
 use crate::mold_runtime::cast_from_matrix;
-use crate::shape::Shape;
+use foundry_core::Pattern;
 
-/// Contenedor `Mold<F>` — Envoltorio de inyección atómica para un patrón `F`.
 pub struct Mold<F> {
     _pattern_token: std::marker::PhantomData<F>,
 }
@@ -10,11 +8,8 @@ pub struct Mold<F> {
 impl<F, T> Mold<F>
 where
     F: Pattern<Output = T>,
-    T: Shape + serde::de::DeserializeOwned,
+    T: serde::de::DeserializeOwned,
 {
-    /// Construye un nuevo molde a partir del patrón (ZST) proporcionado.
-    ///
-    /// Al exigir `Copy`, evitamos que las funciones constantes evalúen destructores (E0493).
     #[inline(always)]
     pub const fn new(_pattern: F) -> Self
     where
@@ -25,14 +20,17 @@ where
         }
     }
 
-    /// Despacha la materialización del objeto. Optimizado mediante poda de ramas muertas.
     #[inline(always)]
     pub fn cast(&self) -> T {
         if let Some(matrix_bytes) = F::BAKED_TEMPLATE {
             unsafe {
-                if let Ok(objeto) = cast_from_matrix::<T>(matrix_bytes) {
-                    return objeto;
+                match cast_from_matrix::<T>(matrix_bytes) {
+                    Ok(objeto) => return objeto,
+                    Err(e) => panic!("foundry: cast_from_matrix falló: {:?}", e),
                 }
+                /*if let Ok(objeto) = cast_from_matrix::<T>(matrix_bytes) {
+                    return objeto;
+                }*/
             }
         }
         F::execute()
@@ -43,6 +41,8 @@ where
         F::BAKED_TEMPLATE.is_some()
     }
 }
+
+// Clone, Copy, Debug sin cambios
 
 impl<F> Clone for Mold<F> {
     fn clone(&self) -> Self {

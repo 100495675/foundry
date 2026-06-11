@@ -101,16 +101,16 @@ where
 
     let payload = &matrix_bytes[HEADER_SIZE..payload_end];
 
-    // Deserializar con la endianness nativa del hardware.
-    // Cada rama del match invoca .deserialize() directamente para evitar
-    // la incompatibilidad de tipos entre WithOtherEndian<_, LittleEndian>
-    // y WithOtherEndian<_, BigEndian>.
-    let result = match Endianness::current() {
-        Endianness::Little => bincode::options().with_little_endian().deserialize(payload),
-        Endianness::Big => bincode::options().with_big_endian().deserialize(payload),
-    };
 
-    result.map_err(|_| MatrixError::DeserializationFailed)
+    bincode_options()
+    .deserialize(payload)
+    .map_err(|_| MatrixError::DeserializationFailed)
+}
+
+pub fn bincode_options() -> impl bincode::Options {
+    bincode::options()
+        .with_little_endian()
+        .with_varint_encoding()
 }
 
 #[cfg(test)]

@@ -64,7 +64,8 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[derive(Copy, Clone)]
         #vis struct #name;
 
-        impl ::foundry::internal::Pattern for #name {
+        #[allow(unexpected_cfgs)]
+        impl ::foundry::Pattern for #name {
             type Output = #output_type;
             const AST_HASH: u64 = #ast_hash;
             const DEPENDENCY_HASH: u64 = #dep_hash;
@@ -98,19 +99,34 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[test]
         fn #test_capture_name() {
             use ::std::io::Write as _;
+            use ::foundry::internal::bincode::Options as _;
 
-            let objeto = #raw_name();
-            let payload = ::foundry::internal::bincode::serialize(&objeto).unwrap();
-
+            // Comprobar si el .matrix existente ya tiene el AST_HASH actual
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
             let carpeta = std::path::Path::new(&manifest).join("foundry_data");
+            let ruta_matrix = carpeta.join(format!("{}.matrix", stringify!(#name)));
+
+            if let Ok(bytes) = std::fs::read(&ruta_matrix) {
+                if bytes.len() >= 15 {
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&bytes[7..15]);
+                    let saved_ast = u64::from_le_bytes(buf);
+                    if saved_ast == #ast_hash {
+                        return; // vigente, no recapturar
+                    }
+                }
+            }
+
+            // Desactualizado o inexistente — capturar
+            let objeto = #raw_name();
+            let payload = ::foundry::internal::bincode_options()
+                .serialize(&objeto)
+                .unwrap();
+
             std::fs::create_dir_all(&carpeta).unwrap();
-
-            let ruta_archivo = carpeta.join(format!("{}.matrix", stringify!(#name)));
-            let mut file = std::fs::File::create(&ruta_archivo).unwrap();
-
+            let mut file = std::fs::File::create(&ruta_matrix).unwrap();
             file.write_all(b"MATR").unwrap();
-            file.write_all(&[0x01]).unwrap(); // Little Endian
+            file.write_all(&[0x01]).unwrap();
             file.write_all(&1u16.to_le_bytes()).unwrap();
             file.write_all(&#ast_hash.to_le_bytes()).unwrap();
             file.write_all(&#dep_hash.to_le_bytes()).unwrap();

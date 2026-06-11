@@ -1,0 +1,850 @@
+.
+├── all
+├── Cargo.lock
+├── Cargo.toml
+├── foundry
+│   ├── Cargo.toml
+│   └── src
+│       ├── lib.rs
+│       ├── mold.rs
+│       ├── mold_runtime.rs
+│       └── shape.rs
+├── foundry-build
+│   ├── Cargo.toml
+│   └── src
+│       ├── capture.rs
+│       ├── hashing.rs
+│       └── lib.rs
+├── foundry-internal
+│   ├── Cargo.toml
+│   └── src
+│       └── lib.rs
+├── foundry-macros
+│   ├── Cargo.toml
+│   └── src
+│       ├── derive_shape.rs
+│       ├── lib.rs
+│       └── pattern.rs
+└── list_all.sh
+
+9 directories, 19 files
+Cargo.toml:
+[workspace]
+members = ["foundry", "foundry-macros", "foundry-build", "foundry-internal"]
+resolver = "2"
+foundry/Cargo.toml:
+[package]
+name = "foundry"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+foundry-macros = { path = "../foundry-macros" }
+foundry-internal = { path = "../foundry-internal" }
+bincode = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+
+# ESTA ES LA SECCIÓN CRÍTICA QUE FALTA O ESTÁ DESALINEADA
+[features]
+foundry-capture = []
+foundry/src/lib.rs:
+pub mod mold;
+pub mod mold_runtime;
+pub mod shape;
+
+pub mod internal {
+    pub use foundry_internal::Pattern;
+    // Hacemos que bincode sea visible públicamente para el código inyectado por la macro
+    pub use bincode;
+}
+
+pub use foundry_macros::pattern;
+pub use foundry_macros::Shape;
+
+pub mod prelude {
+    pub use crate::mold::Mold;
+    pub use crate::pattern;
+    pub use crate::shape::Shape as TraitShape;
+    pub use crate::Shape;
+}
+foundry/src/mold_runtime.rs:
+use bincode::Options;
+
+/// Errores posibles durante la deserialización de una matriz `.matrix`.
+#[derive(Debug)]
+pub enum MatrixError {
+    /// La cabecera está truncada o corrupta.
+    CorruptedHeader,
+    /// Los bytes mágicos no coinciden con "MATR".
+    InvalidMagic,
+    /// La versión de la cabecera no es soportada.
+    UnsupportedVersion(u16),
+    /// La endianness del artefacto no coincide con la del hardware actual.
+    EndiannessConflict,
+    /// El payload está truncado respecto a la longitud declarada.
+    TruncatedPayload,
+    /// La deserialización de Bincode ha fallado.
+    DeserializationFailed,
+}
+
+/// Marcador de endianness del artefacto.
+#[derive(Debug, Copy, Clone, PartialEq)]
+#[repr(u8)]
+pub enum Endianness {
+    Little = 0x01,
+    Big = 0x02,
+}
+
+impl Endianness {
+    /// Retorna la endianness nativa del hardware de ejecución actual.
+    #[inline(always)]
+    const fn current() -> Self {
+        #[cfg(target_endian = "little")]
+        {
+            Endianness::Little
+        }
+        #[cfg(target_endian = "big")]
+        {
+            Endianness::Big
+        }
+    }
+}
+
+/// Tamaño fijo de la cabecera `.matrix` en bytes.
+const HEADER_SIZE: usize = 31;
+
+/// Extrae de forma segura y veloz los datos binarios contiguos mapeados en el ejecutable.
+///
+/// Realiza validación completa de cabecera física (magia, endianness, versión, truncado)
+/// antes de delegar la deserialización a Bincode con la endianness nativa del hardware.
+///
+/// # Seguridad
+///
+/// El llamante debe garantizar que `matrix_bytes` apunta a memoria válida y alineada
+/// de al menos `HEADER_SIZE` bytes de longitud. Esta función es invocada exclusivamente
+/// desde `Mold::cast()` tras verificar la existencia de `BAKED_TEMPLATE`.
+pub unsafe fn cast_from_matrix<T>(matrix_bytes: &[u8]) -> Result<T, MatrixError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    // Validación de longitud mínima de cabecera
+    if matrix_bytes.len() < HEADER_SIZE {
+        return Err(MatrixError::CorruptedHeader);
+    }
+
+    // Validación de bytes mágicos
+    if &matrix_bytes[0..4] != b"MATR" {
+        return Err(MatrixError::InvalidMagic);
+    }
+
+    // Validación de marca de endianness
+    let matrix_endian = match matrix_bytes[4] {
+        0x01 => Endianness::Little,
+        0x02 => Endianness::Big,
+        _ => return Err(MatrixError::CorruptedHeader),
+    };
+
+    // Validar cross-endian accidental en runtime
+    if matrix_endian != Endianness::current() {
+        return Err(MatrixError::EndiannessConflict);
+    }
+
+    // Al garantizar la coincidencia de endianness, los bytes se leen de forma nativa
+    let version = u16::from_ne_bytes([matrix_bytes[5], matrix_bytes[6]]);
+    if version != 1 {
+        return Err(MatrixError::UnsupportedVersion(version));
+    }
+
+    let read_u64_native = |offset: usize| -> u64 {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&matrix_bytes[offset..offset + 8]);
+        u64::from_ne_bytes(buf)
+    };
+
+    let payload_len = read_u64_native(23) as usize;
+    let payload_end = HEADER_SIZE + payload_len;
+
+    // Validar que el payload no esté truncado
+    if matrix_bytes.len() < payload_end {
+        return Err(MatrixError::TruncatedPayload);
+    }
+
+    let payload = &matrix_bytes[HEADER_SIZE..payload_end];
+
+    // Deserializar con la endianness nativa del hardware.
+    // Cada rama del match invoca .deserialize() directamente para evitar
+    // la incompatibilidad de tipos entre WithOtherEndian<_, LittleEndian>
+    // y WithOtherEndian<_, BigEndian>.
+    let result = match Endianness::current() {
+        Endianness::Little => bincode::options().with_little_endian().deserialize(payload),
+        Endianness::Big => bincode::options().with_big_endian().deserialize(payload),
+    };
+
+    result.map_err(|_| MatrixError::DeserializationFailed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct EstructuraPrueba {
+        texto: String,
+        numero: u32,
+    }
+
+    #[test]
+    fn validar_reconstitucion_local_posix() {
+        // 1. Creamos el objeto nativo
+        let objeto = EstructuraPrueba {
+            texto: "Datos_Congelados_Nativos".to_string(),
+            numero: 1337,
+        };
+
+        // 2. Serializamos el payload usando bincode con la endianness del hardware actual
+        use bincode::Options;
+        let payload = bincode::options()
+            .with_little_endian() // Asumimos x86_64 / ARM64 estándar de desarrollo
+            .serialize(&objeto)
+            .unwrap();
+
+        // 3. Esculpimos manualmente la cabecera física definitiva de 31 bytes
+        let mut matriz_artesanal = Vec::new();
+        matriz_artesanal.extend_from_slice(b"MATR"); // MAGIC (4B)
+        matriz_artesanal.push(0x01); // ENDIAN MARK: LE (1B)
+        matriz_artesanal.extend_from_slice(&1u16.to_le_bytes()); // VERSION (2B)
+        matriz_artesanal.extend_from_slice(&11111u64.to_le_bytes()); // AST HASH (8B)
+        matriz_artesanal.extend_from_slice(&22222u64.to_le_bytes()); // DEP HASH (8B)
+        matriz_artesanal.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // PAYLOAD LEN (8B)
+
+        // Concatener los datos moleculares
+        matriz_artesanal.extend_from_slice(&payload);
+
+        // 4. Invocamos al runtime en aislamiento total
+        unsafe {
+            let resultado: Result<EstructuraPrueba, MatrixError> =
+                cast_from_matrix(&matriz_artesanal);
+
+            assert!(resultado.is_ok(), "El runtime rechazó la matriz local");
+            let objeto_fundido = resultado.unwrap();
+
+            assert_eq!(objeto_fundido.texto, "Datos_Congelados_Nativos");
+            assert_eq!(objeto_fundido.numero, 1337);
+        }
+    }
+}
+foundry/src/mold.rs:
+use crate::internal::Pattern;
+use crate::mold_runtime::cast_from_matrix;
+use crate::shape::Shape;
+
+/// Contenedor `Mold<F>` — Envoltorio de inyección atómica para un patrón `F`.
+pub struct Mold<F> {
+    _pattern_token: std::marker::PhantomData<F>,
+}
+
+impl<F, T> Mold<F>
+where
+    F: Pattern<Output = T>,
+    T: Shape + serde::de::DeserializeOwned,
+{
+    /// Construye un nuevo molde a partir del patrón (ZST) proporcionado.
+    ///
+    /// Al exigir `Copy`, evitamos que las funciones constantes evalúen destructores (E0493).
+    #[inline(always)]
+    pub const fn new(_pattern: F) -> Self
+    where
+        F: Copy,
+    {
+        Self {
+            _pattern_token: std::marker::PhantomData,
+        }
+    }
+
+    /// Despacha la materialización del objeto. Optimizado mediante poda de ramas muertas.
+    #[inline(always)]
+    pub fn cast(&self) -> T {
+        if let Some(matrix_bytes) = F::BAKED_TEMPLATE {
+            unsafe {
+                if let Ok(objeto) = cast_from_matrix::<T>(matrix_bytes) {
+                    return objeto;
+                }
+            }
+        }
+        F::execute()
+    }
+
+    #[inline(always)]
+    pub const fn is_baked(&self) -> bool {
+        F::BAKED_TEMPLATE.is_some()
+    }
+}
+
+impl<F> Clone for Mold<F> {
+    fn clone(&self) -> Self {
+        Self {
+            _pattern_token: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F> Copy for Mold<F> {}
+
+impl<F: Pattern> std::fmt::Debug for Mold<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mold")
+            .field("baked", &F::BAKED_TEMPLATE.is_some())
+            .finish()
+    }
+}
+foundry/src/shape.rs:
+/// Contrato geográfico de tipos para la persistencia estática.
+///
+/// Un tipo que implementa `Shape` garantiza que su layout es determinista,
+/// estable entre compilaciones y compatible con la deserialización binaria directa.
+///
+/// # Seguridad
+///
+/// Quien implemente este trait asume la garantía formal ante el compilador de que el tipo:
+/// - No contiene punteros crudos ni referencias no-`'static`.
+/// - No utiliza despacho dinámico (`dyn Trait`).
+/// - No contiene tipos de referencia contable (`Rc`, `Arc`, `Weak`, etc.).
+/// - No contiene tipos de celda (`RefCell`, `Cell`, `Mutex`, `RwLock`).
+/// - No contiene handles del sistema (`File`, `TcpStream`, `UdpSocket`, etc.).
+/// - Posee un layout determinista y estable entre compilaciones.
+/// - Es compatible con `serde::Serialize` y `serde::Deserialize`.
+pub unsafe trait Shape {}
+
+// ─── Implementaciones estándar para tipos primitivos ─────────────────────────
+
+unsafe impl Shape for i8 {}
+unsafe impl Shape for i16 {}
+unsafe impl Shape for i32 {}
+unsafe impl Shape for i64 {}
+unsafe impl Shape for i128 {}
+unsafe impl Shape for isize {}
+unsafe impl Shape for u8 {}
+unsafe impl Shape for u16 {}
+unsafe impl Shape for u32 {}
+unsafe impl Shape for u64 {}
+unsafe impl Shape for u128 {}
+unsafe impl Shape for usize {}
+unsafe impl Shape for f32 {}
+unsafe impl Shape for f64 {}
+unsafe impl Shape for bool {}
+unsafe impl Shape for char {}
+unsafe impl Shape for String {}
+unsafe impl Shape for () {}
+
+// ─── Colecciones estándar ────────────────────────────────────────────────────
+
+unsafe impl<T: Shape> Shape for Vec<T> {}
+unsafe impl<T: Shape> Shape for Option<T> {}
+unsafe impl<T: Shape, E: Shape> Shape for Result<T, E> {}
+unsafe impl<T: Shape> Shape for Box<T> {}
+
+unsafe impl<K: Shape, V: Shape> Shape for std::collections::HashMap<K, V> {}
+unsafe impl<T: Shape> Shape for std::collections::HashSet<T> {}
+unsafe impl<K: Shape, V: Shape> Shape for std::collections::BTreeMap<K, V> {}
+unsafe impl<T: Shape> Shape for std::collections::BTreeSet<T> {}
+
+// ─── Arreglos y rebanadas ────────────────────────────────────────────────────
+
+unsafe impl<T: Shape> Shape for [T] {}
+unsafe impl<T: Shape, const N: usize> Shape for [T; N] {}
+
+// ─── Referencias estáticas ───────────────────────────────────────────────────
+
+unsafe impl Shape for &'static str {}
+unsafe impl<T: Shape + ?Sized> Shape for &'static T {}
+foundry-build/Cargo.toml:
+[package]
+name = "foundry-build"                                                          # <-- ¡ASEGÚRATE DE QUE TENGA EL GUION MEDIO!
+version = "1.0.0"
+edition = "2021"
+description = "Utilidades del Script de Compilación para el ecosistema foundry"
+
+[dependencies]
+bincode = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+foundry-build/src/lib.rs:
+//! # foundry-build
+//!
+//! Utilidades del Script de Compilación para la Fragua Adaptativa.
+
+pub mod capture;
+pub mod hashing;
+
+pub use capture::{examinar_estado_matriz, execute_matrix_capture, MatrixStatus};
+pub use hashing::{compute_ast_hash, compute_dependency_hash, compute_environment_hash};
+
+/// Función orquestadora maestra ejecutada por el build.rs del cliente.
+pub fn forge() {
+    // 1. Evitar bucles infinitos de reentrada en la subcompilación de captura
+    if std::env::var("FOUNDRY_CAPTURE_PASS").is_ok() {
+        return;
+    }
+
+    // --- EL FILTRO DE LIBERTAD: CONTROL DE runtime EN COMPILACIÓN ---
+    // Si el usuario NO ha configurado la variable FOUNDRY_BAKE="1", el script
+    // no hace absolutamente nada. El código corre en modo dinámico tradicional.
+    if std::env::var("FOUNDRY_BAKE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        let out_dir = std::env::var("OUT_DIR").expect("Falta la variable OUT_DIR");
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("Falta la variable CARGO_MANIFEST_DIR");
+
+        // Informar a Cargo cuándo reevaluar el script si estamos horneando
+        println!("cargo:rerun-if-changed=src/main.rs");
+        println!("cargo:rerun-if-changed=Cargo.lock");
+
+        let capture_target_dir = std::path::Path::new(&out_dir).join("foundry_capture_target");
+
+        // Ejecutamos la suite de tests filtrando por las funciones instrumentales
+        let status = std::process::Command::new("cargo")
+            .args(&[
+                "test",
+                "--features",
+                "foundry-capture",
+                "--target-dir",
+                capture_target_dir.to_str().unwrap(),
+                "--",
+                "__foundry_capture_",
+            ])
+            .current_dir(&manifest_dir)
+            .env("FOUNDRY_CAPTURE_PASS", "1")
+            .env("OUT_DIR", &out_dir)
+            .status()
+            .expect("Error crítico en la captura nativa de Foundry");
+
+        if status.success() {
+            // El horneado físico se ha completado: activamos la inyección estática en las macros
+            println!("cargo:rustc-cfg=foundry_baked");
+        } else {
+            println!("cargo:warning=foundry: La fase de captura molecular falló.");
+        }
+    } else {
+        // Modo Desarrollo Libre: Informamos a Cargo que reevalúe siempre para permitir iteraciones rápidas en caliente
+        println!("cargo:rerun-if-changed=src/main.rs");
+    }
+}
+foundry-build/src/capture.rs:
+use bincode::Options;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::Path;
+
+/// Estado de vigencia de un artefacto `.matrix`.
+#[derive(Debug)]
+pub enum MatrixStatus {
+    /// El artefacto es válido y coincide con el código actual.
+    Valid,
+    /// El artefacto no existe.
+    Missing,
+    /// El artefacto está desactualizado (código o dependencias cambiaron).
+    Obsolete(String),
+    /// El artefacto está corrupto (cabecera inválida).
+    Corrupted,
+}
+
+/// Tamaño fijo de la cabecera `.matrix` en bytes.
+const HEADER_SIZE: usize = 31;
+
+/// Inspecciona atómicamente la matriz para certificar su correspondencia con el código actual.
+///
+/// Lee directamente la cabecera física del artefacto `.matrix` y compara las firmas
+/// genéticas (AST Hash y Dependency Hash) con los valores esperados, mitigando
+/// fallos TOCTOU (*Time-of-Check to Time-of-Use*).
+pub fn examinar_estado_matriz(name: &str, expected_ast: u64, expected_dep: u64) -> MatrixStatus {
+    let out_dir = match std::env::var("OUT_DIR") {
+        Ok(d) => d,
+        Err(_) => return MatrixStatus::Missing,
+    };
+    let ruta = Path::new(&out_dir)
+        .join("foundry")
+        .join(format!("{}.matrix", name));
+
+    let mut file = match File::open(&ruta) {
+        Ok(f) => f,
+        Err(_) => return MatrixStatus::Missing,
+    };
+
+    let mut header = [0u8; HEADER_SIZE];
+    if file.read_exact(&mut header).is_err() {
+        return MatrixStatus::Corrupted;
+    }
+    if &header[0..4] != b"MATR" {
+        return MatrixStatus::Corrupted;
+    }
+
+    let target_endian =
+        std::env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
+
+    let read_u64 = |start: usize| -> u64 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&header[start..start + 8]);
+        if target_endian == "little" {
+            u64::from_le_bytes(b)
+        } else {
+            u64::from_be_bytes(b)
+        }
+    };
+
+    let found_ast = read_u64(7);
+    let found_dep = read_u64(15);
+
+    if found_ast != expected_ast {
+        return MatrixStatus::Obsolete("Código fuente modificado.".into());
+    }
+    if found_dep != expected_dep {
+        return MatrixStatus::Obsolete("Dependencias o Arquitectura alteradas.".into());
+    }
+
+    MatrixStatus::Valid
+}
+
+/// Esculpe el negativo molecular `.matrix` inyectando la firma genética en su cabecera física.
+///
+/// Serializa el objeto producido por `f` con Bincode, prependedo la cabecera de 31 bytes
+/// con magia, endianness, versión, hashes y longitud del payload. Utiliza escritura
+/// atómica mediante archivo temporal + `rename` para garantizar integridad.
+///
+/// # Layout de cabecera (31 bytes)
+///
+/// | Offset | Tamaño | Campo            |
+/// |--------|--------|------------------|
+/// | 0..4   | 4 B    | MAGIC `"MATR"`   |
+/// | 4      | 1 B    | Endianness mark  |
+/// | 5..7   | 2 B    | Version (u16)    |
+/// | 7..15  | 8 B    | AST Hash (u64)   |
+/// | 15..23 | 8 B    | Dep Hash (u64)   |
+/// | 23..31 | 8 B    | Payload Len (u64)|
+pub fn execute_matrix_capture<T>(name: &str, ast_hash: u64, dep_hash: u64, f: fn() -> T)
+where
+    T: serde::Serialize,
+{
+    let objeto = f();
+    let target = std::env::var("TARGET").unwrap_or_default();
+
+    // Cross-Compilation: Determinar orientación de bytes del procesador objetivo
+    let es_big_endian = ["mips", "powerpc", "sparc", "s390x"]
+        .iter()
+        .any(|arch| target.starts_with(arch));
+
+    let payload = if es_big_endian {
+        bincode::options()
+            .with_big_endian()
+            .serialize(&objeto)
+            .unwrap()
+    } else {
+        bincode::options()
+            .with_little_endian()
+            .serialize(&objeto)
+            .unwrap()
+    };
+
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let carpeta = Path::new(&out_dir).join("foundry");
+    fs::create_dir_all(&carpeta).unwrap();
+    let ruta_final = carpeta.join(format!("{}.matrix", name));
+    let ruta_temporal = ruta_final.with_extension("tmp");
+
+    {
+        let mut tmp_file = File::create(&ruta_temporal).unwrap();
+
+        // MAGIC (4 bytes)
+        tmp_file.write_all(b"MATR").unwrap();
+
+        // Endianness mark (1 byte)
+        tmp_file
+            .write_all(&[if es_big_endian { 0x02 } else { 0x01 }])
+            .unwrap();
+
+        // Version core (2 bytes, u16 nativo del target)
+        let version_bytes: [u8; 2] = if es_big_endian {
+            1u16.to_be_bytes()
+        } else {
+            1u16.to_le_bytes()
+        };
+        tmp_file.write_all(&version_bytes).unwrap();
+
+        // Helper para escribir u64 en endianness del target
+        let write_u64 = |w: &mut File, v: u64| {
+            let b = if es_big_endian {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            };
+            w.write_all(&b).unwrap();
+        };
+
+        // AST Hash (8 bytes)
+        write_u64(&mut tmp_file, ast_hash);
+
+        // Dependency Hash (8 bytes)
+        write_u64(&mut tmp_file, dep_hash);
+
+        // Payload Len (8 bytes)
+        write_u64(&mut tmp_file, payload.len() as u64);
+
+        // Payload (longitud variable)
+        tmp_file.write_all(&payload).unwrap();
+
+        // Asegurar persistencia física en el medio de almacenamiento
+        tmp_file.sync_all().unwrap();
+    }
+
+    // Intercambio atómico del archivo en el sistema de archivos
+    fs::rename(&ruta_temporal, &ruta_final).unwrap();
+}
+foundry-build/src/hashing.rs:
+//! Motor de cálculo de contexto semántico (AST + Lockfile).
+//!
+//! Proporciona utilidades para computar las firmas genéticas que identifican
+//! de forma unívoca el estado del código fuente y las dependencias del proyecto.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::Path;
+
+/// Calcula el hash semántico del AST a partir de la representación textual del código fuente.
+///
+/// Este hash se utiliza como firma sintáctica que identifica de forma unívoca
+/// el cuerpo de una función patrón.
+pub fn compute_ast_hash(source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Calcula el hash de dependencias a partir del `Cargo.lock` del workspace.
+///
+/// Retorna `None` si el archivo no puede ser leído (proyecto sin lockfile).
+pub fn compute_dependency_hash(lockfile_path: &Path) -> Option<u64> {
+    let content = std::fs::read_to_string(lockfile_path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Calcula un hash combinado del entorno de compilación actual.
+///
+/// Incorpora variables de entorno de Cargo y, si está disponible, el contenido
+/// del `Cargo.lock` para producir una firma que capture tanto el estado del
+/// código como el del ecosistema de dependencias.
+pub fn compute_environment_hash() -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    // Incorporar información del entorno de compilación
+    std::env::var("CARGO_PKG_VERSION")
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    std::env::var("CARGO_PKG_NAME")
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    std::env::var("TARGET")
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    std::env::var("PROFILE")
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    std::env::var("OPT_LEVEL")
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    std::env::var("DEBUG").unwrap_or_default().hash(&mut hasher);
+
+    // Intentar incorporar el Cargo.lock
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let lock_path = Path::new(&manifest_dir).join("Cargo.lock");
+        if let Some(dep_hash) = compute_dependency_hash(&lock_path) {
+            dep_hash.hash(&mut hasher);
+        }
+    }
+
+    hasher.finish()
+}
+foundry-internal/Cargo.toml:
+[package]
+name = "foundry-internal"
+version = "1.0.0"
+edition = "2021"
+description = "Tipos privados de control interno para el ecosistema foundry"
+foundry-internal/src/lib.rs:
+//! # foundry-internal
+//!
+//! Tipos privados de control interno para el ecosistema `foundry`.
+
+/// Trait de contrato estático para patrones de inyección atómica.
+pub trait Pattern {
+    /// Tipo de retorno del patrón (el tipo materializado por `Mold::cast()`).
+    type Output;
+
+    /// Firma sintáctica del código fuente del cuerpo de la función.
+    const AST_HASH: u64;
+
+    /// Firma del entorno de dependencias y arquitectura.
+    const DEPENDENCY_HASH: u64;
+
+    /// Bytes del artefacto pre-horneado, disponibles solo en compilación de producción.
+    const BAKED_TEMPLATE: Option<&'static [u8]>;
+
+    /// Ejecuta la lógica original del patrón como mecanismo de fallback.
+    fn execute() -> Self::Output;
+}
+foundry-macros/Cargo.toml:
+[package]
+name = "foundry-macros"
+version = "1.0.0"
+edition = "2021"
+description = "Procedural macros para el ecosistema foundry"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "parsing"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+foundry-macros/src/lib.rs:
+extern crate proc_macro;
+
+mod derive_shape;
+mod pattern;
+
+/// Macro de derivación automática para el layout de memoria seguro.
+#[proc_macro_derive(Shape)]
+pub fn derive_shape(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    derive_shape::derive_shape_impl(input)
+}
+
+/// Macro de atributo atómica para registrar patrones en la fragua.
+#[proc_macro_attribute]
+pub fn pattern(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    pattern::pattern_impl(attr, item)
+}
+foundry-macros/src/derive_shape.rs:
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
+
+/// Implementación de `#[derive(Shape)]`.
+///
+/// Opera como la primera línea de defensa sintáctica del ecosistema, interceptando
+/// en tiempo de compilación el uso de tipos incompatibles con la persistencia estática
+/// antes de que puedan corromper la memoria en runtime.
+pub fn derive_shape_impl(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    if let Err(e) = verificar_anatomia_sintactica(&input) {
+        return e.to_compile_error().into();
+    }
+
+    let expanded = quote! {
+        unsafe impl #impl_generics ::foundry::shape::Shape for #name #ty_generics #where_clause {}
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Verifica la anatomía sintáctica del tipo derivado.
+fn verificar_anatomia_sintactica(input: &DeriveInput) -> Result<(), syn::Error> {
+    match &input.data {
+        Data::Struct(s) => analizar_campos(&s.fields),
+        Data::Enum(e) => {
+            for v in &e.variants {
+                analizar_campos(&v.fields)?;
+            }
+            Ok(())
+        }
+        Data::Union(_) => Err(syn::Error::new_spanned(
+            input,
+            "Shape prohibe Unions (Layout no determinista)",
+        )),
+    }
+}
+
+/// Analiza los campos de una variante o estructura.
+fn analizar_campos(fields: &Fields) -> Result<(), syn::Error> {
+    let iterador: Box<dyn Iterator<Item = &syn::Field>> = match fields {
+        Fields::Named(n) => Box::new(n.named.iter()),
+        Fields::Unnamed(u) => Box::new(u.unnamed.iter()),
+        Fields::Unit => Box::new(std::iter::empty()),
+    };
+    for field in iterador {
+        evaluar_tipo(&field.ty)?;
+    }
+    Ok(())
+}
+
+/// Evalúa recursivamente un tipo para detectar construcciones prohibidas.
+fn evaluar_tipo(ty: &Type) -> Result<(), syn::Error> {
+    match ty {
+        Type::Ptr(_) => Err(syn::Error::new_spanned(
+            ty,
+            "Shape prohibe el uso de punteros crudos.",
+        )),
+        Type::TraitObject(_) => Err(syn::Error::new_spanned(
+            ty,
+            "Shape no tolera despacho dinámico (dyn Trait).",
+        )),
+        Type::Reference(r) => {
+            if let Some(lifetime) = &r.lifetime {
+                if lifetime.ident.to_string() != "static" {
+                    return Err(syn::Error::new_spanned(
+                        lifetime,
+                        "Shape solo permite referencias con lifetime 'static",
+                    ));
+                }
+            } else {
+                return Err(syn::Error::new_spanned(
+                    r,
+                    "Referencias requieren un lifetime 'static explícito.",
+                ));
+            }
+            evaluar_tipo(&r.elem)
+        }
+        Type::Path(p) => {
+            if let Some(segment) = p.path.segments.last() {
+                let ident_str = segment.ident.to_string();
+                const LISTA_NEGRA: &[&str] = &[
+                    "Rc",
+                    "Arc",
+                    "Weak",
+                    "RefCell",
+                    "Cell",
+                    "Mutex",
+                    "RwLock",
+                    "File",
+                    "TcpStream",
+                    "UdpSocket",
+                    "Sender",
+                    "Receiver",
+                ];
+                if LISTA_NEGRA.contains(&ident_str.as_str()) {
+                    return Err(syn::Error::new_spanned(
+                        segment,
+                        format!("El tipo [{}] rompe los invariantes de Shape.", ident_str),
+                    ));
+                }
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    for arg in &args.args {
+                        if let syn::GenericArgument::Type(inner_ty) = arg {
+                            evaluar_tipo(inner_ty)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+foundry-macros/src/derive_pattern.rs:
