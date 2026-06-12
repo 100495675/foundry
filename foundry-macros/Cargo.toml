@@ -2,7 +2,7 @@
 name = "foundry-macros"
 version = "1.0.0"
 edition = "2021"
-description = "Procedural macros para el ecosistema foundry"
+description = "Procedural macros for the foundry ecosystem"
 
 [lib]
 proc-macro = true

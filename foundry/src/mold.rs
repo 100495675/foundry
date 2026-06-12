@@ -1,79 +1,91 @@
-use crate::mold_runtime::cast_from_matrix;
+use crate::runtime::cast_from_matrix;
 
-/// Trait interno para proyectar y resolver de forma estática el tipo de retorno
-/// de cualquier Function Item o puntero plano en Rust Estable.
-pub trait MoldPattern {
+/// Internal infrastructure trait to statically resolve the evaluation
+/// of any pure executable logic (Function Items or function pointers) during fallback.
+pub trait Pour {
     type Output;
-    fn ejecutar(&self) -> Self::Output;
+    fn pour(&self) -> Self::Output;
 }
 
-// Implementación automática universal para punteros de función puros
-impl<T> MoldPattern for fn() -> T {
-    type Output = T;
+// Universal Blanket Implementation for anything that satisfies `Fn() -> R + Copy`.
+// Seamlessly covers standard function pointers and clean Function Items without overlapping.
+impl<R, G> Pour for G
+where
+    G: Fn() -> R + Copy,
+{
+    type Output = R;
 
     #[inline(always)]
-    fn ejecutar(&self) -> T {
+    fn pour(&self) -> R {
         (self)()
     }
 }
 
-/// Envoltura universal purista de cero coste en runtime.
+/// Universal zero-cost runtime wrapper.
 ///
-/// El tipo `F` mapea con precisión matemática la identidad única de la función.
+/// Occupies exactly 24 bytes on the Stack and is as lightweight as a primitive type.
+/// The `F` type mathematically maps the unique identity of the function in the foundry.
 pub struct Mold<F> {
-    funcion_fallback: F,
-    bytes_inyectados: Option<&'static [u8]>,
+    fallback_function: F,
+    injected_bytes: Option<&'static [u8]>,
 }
 
-// Implementación de Clone explícita para evitar restricciones virales
 impl<F: Clone> Clone for Mold<F> {
     #[inline(always)]
     fn clone(&self) -> Self {
         Self {
-            funcion_fallback: self.funcion_fallback.clone(),
-            bytes_inyectados: self.bytes_inyectados,
+            fallback_function: self.fallback_function.clone(),
+            injected_bytes: self.injected_bytes,
         }
     }
 }
 
-// Implementación de Copy para permitir el paso por valor nativo sin coste
 impl<F: Copy> Copy for Mold<F> {}
 
 impl<F> Mold<F>
 where
-    F: MoldPattern + Copy,
-    <F as MoldPattern>::Output: serde::de::DeserializeOwned,
+    F: Pour + Copy,
+    <F as Pour>::Output: serde::de::DeserializeOwned,
 {
-    /// Constructor interno de cero asignación en el Heap.
+    /// Internal constructor for zero-allocation on the Heap.
     #[inline(always)]
     #[doc(hidden)]
-    pub const fn new_internal(
-        funcion_fallback: F,
-        bytes_inyectados: Option<&'static [u8]>,
-    ) -> Self {
+    pub const fn new_internal(fallback_function: F, injected_bytes: Option<&'static [u8]>) -> Self {
         Self {
-            funcion_fallback,
-            bytes_inyectados,
+            fallback_function,
+            injected_bytes,
         }
     }
 
-    /// Deserializa desde los bytes estáticos inyectados o ejecuta la función original.
+    /// Deserializes from the static injected bytes (Forged Phase) or pours the original function (Dynamic Phase).
     #[inline(always)]
-    pub fn cast(&self) -> <F as MoldPattern>::Output {
-        if let Some(matrix_bytes) = self.bytes_inyectados {
-            match cast_from_matrix::<<F as MoldPattern>::Output>(matrix_bytes) {
-                Ok(objeto) => return objeto,
-                Err(e) => panic!("foundry: cast_from_matrix falló: {:?}", e),
+    pub fn cast(&self) -> <F as Pour>::Output {
+        if let Some(matrix_bytes) = self.injected_bytes {
+            match cast_from_matrix::<<F as Pour>::Output>(matrix_bytes) {
+                Ok(object) => return object,
+                Err(e) => panic!("foundry: cast_from_matrix failed: {:?}", e),
             }
         }
 
-        // Ejecución directa del fallback, 100% inlinable por el compilador
-        self.funcion_fallback.ejecutar()
+        // Pours the original function: zero Box, zero vtable, 100% inlinable.
+        self.fallback_function.pour()
     }
 
-    /// Comprobación booleana en tiempo de compilación.
+    /// Strict binary guarantee: returns `true` only if the physical binary
+    /// carries the pre-calculated bytes injected from the `.matrix` file.
     #[inline(always)]
-    pub const fn is_baked(&self) -> bool {
-        self.bytes_inyectados.is_some()
+    pub const fn is_forged(&self) -> bool {
+        self.injected_bytes.is_some()
     }
 }
+
+// --- SAFE ALGEBRAIC IDENTITY WITHOUT UB ---
+// We restrict strict equality to named function pointers (`Mold<fn() -> T>`).
+impl<T> PartialEq for Mold<fn() -> T> {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::fn_addr_eq(self.fallback_function, other.fallback_function)
+    }
+}
+
+impl<T> Eq for Mold<fn() -> T> {}

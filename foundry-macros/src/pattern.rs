@@ -37,7 +37,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         type_hash = type_hash.wrapping_mul(0x100000001b3u64);
     }
 
-    // --- ESCÁNER DE COMPILACIÓN target/foundry_data ---
+    // --- TARGET/FOUNDRY_DATA COMPILATION SCANNER ---
     let mut matrix_bytes_token = quote! { None };
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let matrix_path = std::path::Path::new(&manifest_dir)
@@ -64,22 +64,25 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // --- EXPANSIÓN SINTÁCTICA LOCAL ---
+    // --- LOCAL EXTENSION TRAIT EXPANSION (NO OVERLAPPING) ---
     let expanded = quote! {
         #(#attrs)*
         #vis #sig #body
 
+        // Local extension trait unique per function item module scope
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
         pub trait #wrapper_trait_name {
-            fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]>;
+            fn __foundry_get_matrix(&self, target_ptr: usize) -> Option<&'static [u8]>;
         }
 
-        impl #wrapper_trait_name for fn() -> #output_type {
+        // Implemented specifically on the reference of the flat function pointer type.
+        // Each function item expands its own unique trait name, completely avoiding E0034.
+        impl #wrapper_trait_name for &fn() -> #output_type {
             #[inline(always)]
-            fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]> {
-                let ptr_actual = #name as fn() -> #output_type;
-                if *self as usize == ptr_actual as usize {
+            fn __foundry_get_matrix(&self, target_ptr: usize) -> Option<&'static [u8]> {
+                let current_ptr = #name as fn() -> #output_type as usize;
+                if target_ptr == current_ptr {
                     #matrix_bytes_token
                 } else {
                     None
@@ -87,7 +90,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // --- TEST DE FRAGUA AUTOMATIZADO ---
+        // --- AUTOMATED FOUNDRY CAPTURE TEST ---
         #[cfg(test)]
         #[test]
         fn #test_capture_name() {
@@ -95,10 +98,10 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             use ::foundry::internal::bincode::Options as _;
 
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-            let carpeta = std::path::Path::new(&manifest).join("target").join("foundry_data");
-            let ruta_matrix = carpeta.join(format!("{}.matrix", stringify!(#name)));
+            let data_dir = std::path::Path::new(&manifest).join("target").join("foundry_data");
+            let matrix_path = data_dir.join(format!("{}.matrix", stringify!(#name)));
 
-            if let Ok(bytes) = std::fs::read(&ruta_matrix) {
+            if let Ok(bytes) = std::fs::read(&matrix_path) {
                 if bytes.len() >= 39 {
                     let mut ast_buf = [0u8; 8];
                     ast_buf.copy_from_slice(&bytes[7..15]);
@@ -114,13 +117,13 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            let objeto = #name();
+            let object = #name();
             let payload = ::foundry::internal::bincode_options()
-                .serialize(&objeto)
+                .serialize(&object)
                 .unwrap();
 
-            std::fs::create_dir_all(&carpeta).unwrap();
-            let mut file = std::fs::File::create(&ruta_matrix).unwrap();
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let mut file = std::fs::File::create(&matrix_path).unwrap();
             file.write_all(b"MATR").unwrap();
             file.write_all(&[0x01]).unwrap();
             file.write_all(&1u16.to_le_bytes()).unwrap();

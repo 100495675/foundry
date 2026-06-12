@@ -1,20 +1,11 @@
 pub mod mold;
-pub mod mold_runtime;
+pub mod runtime;
 
+// Re-export internal components required for macro syntax expansion
+#[doc(hidden)]
 pub mod internal {
-    pub use crate::mold_runtime::bincode_options;
+    pub use crate::runtime::{bincode_options, FoundryFallbackRouter};
     pub use bincode;
-
-    /// Trait fallback global por defecto para la especialización por Autoref.
-    pub trait FoundryFallbackRouter {
-        #[inline(always)]
-        fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]> {
-            None
-        }
-    }
-
-    /// Implementación fallback de última opción sobre la referencia de un puntero.
-    impl<T> FoundryFallbackRouter for &fn() -> T {}
 }
 
 pub use foundry_macros::pattern;
@@ -22,22 +13,27 @@ pub use foundry_macros::pattern;
 pub mod prelude {
     pub use crate::mold;
     pub use crate::mold::Mold;
-    pub use crate::pattern;
+    pub use crate::pattern; // Declarative macro export
 }
 
-/// Macro maestra universal de un solo genérico basado en la función.
+/// Master declarative macro of the forge based on the function type.
 #[macro_export]
 macro_rules! mold {
-    ($funcion:expr) => {{
-        use $crate::internal::FoundryFallbackRouter as _;
+    ($function:expr) => {
+        {
+            // Import the global fallback router from internal plumbing
+            use $crate::runtime::FoundryFallbackRouter as _;
 
-        // Forzamos la degradación implícita a puntero estándar
-        let ptr_funcion: fn() -> _ = $funcion;
+            // Coerce the input into a standard flat function pointer
+            let function_ptr: fn() -> _ = $function;
 
-        // Invocación explícita por referencia para activar el Autoref condicional
-        let bytes = (&ptr_funcion).__foundry_obtener_matriz();
+            // Invoke injecting the hardware memory address as a static discriminator.
+            // Double ampersand (&&function_ptr) orchestrates the Method Resolution Order (MRO):
+            // 1. If decorated with #[pattern], resolves local extension trait on `&fn() -> T` (Max Priority).
+            // 2. If it is a common function, scales down to global FoundryFallbackRouter on `&&fn() -> T`.
+            let bytes = (&&function_ptr).__foundry_get_matrix(function_ptr as usize);
 
-        // Retornamos el Struct con tipado estricto por función
-        $crate::mold::Mold::new_internal(ptr_funcion, bytes)
-    }};
+            $crate::mold::Mold::new_internal(function_ptr, bytes)
+        }
+    };
 }

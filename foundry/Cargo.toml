@@ -2,7 +2,7 @@
 name = "foundry"
 version = "1.0.0"
 edition = "2021"
-description = "Fachada pública limpia para el ecosistema foundry"
+description = "Clean facade for the foundry ecosystem"
 
 [dependencies]
 foundry-core = { path = "../foundry-core" }
