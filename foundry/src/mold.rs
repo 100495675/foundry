@@ -1,12 +1,13 @@
 use crate::mold_runtime::cast_from_matrix;
 
-/// Trait intermedio para proyectar de forma estable el tipo de retorno en Rust estable.
+/// Trait interno para proyectar y resolver de forma estática el tipo de retorno
+/// de cualquier Function Item o puntero plano en Rust Estable.
 pub trait MoldPattern {
     type Output;
     fn ejecutar(&self) -> Self::Output;
 }
 
-// Implementación automática para cualquier puntero de función puro
+// Implementación automática universal para punteros de función puros
 impl<T> MoldPattern for fn() -> T {
     type Output = T;
 
@@ -18,11 +19,25 @@ impl<T> MoldPattern for fn() -> T {
 
 /// Envoltura universal purista de cero coste en runtime.
 ///
-/// El tipo `F` identifica unívocamente la función pura en el sistema de tipos.
+/// El tipo `F` mapea con precisión matemática la identidad única de la función.
 pub struct Mold<F> {
     funcion_fallback: F,
     bytes_inyectados: Option<&'static [u8]>,
 }
+
+// Implementación de Clone explícita para evitar restricciones virales
+impl<F: Clone> Clone for Mold<F> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self {
+            funcion_fallback: self.funcion_fallback.clone(),
+            bytes_inyectados: self.bytes_inyectados,
+        }
+    }
+}
+
+// Implementación de Copy para permitir el paso por valor nativo sin coste
+impl<F: Copy> Copy for Mold<F> {}
 
 impl<F> Mold<F>
 where
@@ -52,7 +67,7 @@ where
             }
         }
 
-        // Ejecutamos el fallback a través de nuestro trait estable
+        // Ejecución directa del fallback, 100% inlinable por el compilador
         self.funcion_fallback.ejecutar()
     }
 

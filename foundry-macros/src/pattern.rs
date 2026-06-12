@@ -75,8 +75,6 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]>;
         }
 
-        // Implementación directa sobre el tipo plano del puntero. Intercepta la llamada
-        // `(&ptr_funcion)` de la macro por prioridad estricta antes que el fallback de la librería.
         impl #wrapper_trait_name for fn() -> #output_type {
             #[inline(always)]
             fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]> {
