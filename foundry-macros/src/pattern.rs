@@ -36,10 +36,9 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         type_hash = type_hash.wrapping_mul(0x100000001b3u64);
     }
 
-    // --- 1. ESCÁNER DE COMPILACIÓN EN OUT_DIR ---
+    // --- 1. ESCÁNER DE COMPILACIÓN (target/foundry_data) ---
     let mut matrix_bytes_token = quote! { None };
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        // Apuntamos a target/foundry_data en la raíz del proyecto del usuario
         let matrix_path = std::path::Path::new(&manifest_dir)
             .join("target")
             .join("foundry_data")
@@ -82,8 +81,12 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             const DEPENDENCY_HASH: u64 = #dep_hash;
             const TYPE_HASH: u64 = #type_hash;
 
-            // Inyección automática si los bytes están listos en OUT_DIR
-            const BAKED_TEMPLATE: Option<&'static [u8]> = #matrix_bytes_token;
+            const BAKED_TEMPLATE: Option<&'static [u8]> = {
+                #[cfg(foundry_baked)]
+                { #matrix_bytes_token }
+                #[cfg(not(foundry_baked))]
+                { None }
+            };
 
             #[inline(always)]
             fn execute() -> Self::Output {
@@ -101,7 +104,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         // --- TEST DE FRAGUA AUTOMATIZADO ---
-        #[cfg(feature = "foundry-capture")]
+        #[cfg(test)]
         #[test]
         fn #test_capture_name() {
             use ::std::io::Write as _;
@@ -109,7 +112,6 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             use ::foundry::Pattern as _;
 
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-            // Mismo directorio unificado compartido
             let carpeta = std::path::Path::new(&manifest).join("target").join("foundry_data");
             let ruta_matrix = carpeta.join(format!("{}.matrix", stringify!(#name)));
 
@@ -126,7 +128,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let saved_type = u64::from_le_bytes(type_buf);
 
                     if saved_ast == #ast_hash && saved_type == current_type_hash {
-                        return;
+                        return; // Caché vigente dentro de target/, abortar re-captura
                     }
                 }
             }
@@ -136,7 +138,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 .serialize(&objeto)
                 .unwrap();
 
-            std::fs::create_dir_all(&carpeta).unwrap(); // Asegurar que target/foundry_data existe
+            std::fs::create_dir_all(&carpeta).unwrap();
             let mut file = std::fs::File::create(&ruta_matrix).unwrap();
             file.write_all(b"MATR").unwrap();
             file.write_all(&[0x01]).unwrap();
