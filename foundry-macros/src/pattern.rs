@@ -37,7 +37,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         type_hash = type_hash.wrapping_mul(0x100000001b3u64);
     }
 
-    // --- 1. ESCÁNER DE COMPILACIÓN target/foundry_data ---
+    // --- ESCÁNER DE COMPILACIÓN target/foundry_data ---
     let mut matrix_bytes_token = quote! { None };
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let matrix_path = std::path::Path::new(&manifest_dir)
@@ -64,20 +64,19 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // --- 2. EXPANSIÓN SINTÁCTICA CON RECEPTOR POR REFERENCIA ---
+    // --- EXPANSIÓN SINTÁCTICA LOCAL ---
     let expanded = quote! {
         #(#attrs)*
         #vis #sig #body
 
-        // Trait de extensión local para evitar la orfandad
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
         pub trait #wrapper_trait_name {
             fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]>;
         }
 
-        // Lo implementamos sobre el puntero plano, pero el método recibe `&self`.
-        // Esto encaja milimétricamente con la llamada `(&ptr_funcion)` de la macro `mold!`.
+        // Implementación directa sobre el tipo plano del puntero. Intercepta la llamada
+        // `(&ptr_funcion)` de la macro por prioridad estricta antes que el fallback de la librería.
         impl #wrapper_trait_name for fn() -> #output_type {
             #[inline(always)]
             fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]> {
