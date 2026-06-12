@@ -6,10 +6,14 @@ pub fn forge() {
         return;
     }
 
-    if !std::env::var("FOUNDRY_BAKE")
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let es_release = profile == "release";
+
+    let bake_forzado = std::env::var("FOUNDRY_BAKE")
         .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+
+    if !es_release && !bake_forzado {
         println!("cargo:rerun-if-changed=src/");
         return;
     }
@@ -37,7 +41,7 @@ pub fn forge() {
         ])
         .current_dir(&manifest_dir)
         .env("FOUNDRY_CAPTURE_PASS", "1")
-        .env("OUT_DIR", &out_dir)
+        // Eliminamos la inyección del env OUT_DIR para que el test lea su propio CARGO_MANIFEST_DIR nativo
         .status()
         .expect("Error crítico en la captura de foundry");
 

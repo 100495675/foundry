@@ -3,17 +3,11 @@ use bincode::Options;
 /// Errores posibles durante la deserialización de una matriz `.matrix`.
 #[derive(Debug)]
 pub enum MatrixError {
-    /// La cabecera está truncada o corrupta.
     CorruptedHeader,
-    /// Los bytes mágicos no coinciden con "MATR".
     InvalidMagic,
-    /// La versión de la cabecera no es soportada.
     UnsupportedVersion(u16),
-    /// La endianness del artefacto no coincide con la del hardware actual.
     EndiannessConflict,
-    /// El payload está truncado respecto a la longitud declarada.
     TruncatedPayload,
-    /// La deserialización de Bincode ha fallado.
     DeserializationFailed,
 }
 
@@ -26,7 +20,6 @@ pub enum Endianness {
 }
 
 impl Endianness {
-    /// Retorna la endianness nativa del hardware de ejecución actual.
     #[inline(always)]
     const fn current() -> Self {
         #[cfg(target_endian = "little")]
@@ -40,20 +33,14 @@ impl Endianness {
     }
 }
 
-/// Tamaño fijo de la cabecera `.matrix` en bytes.
-const HEADER_SIZE: usize = 31;
+/// Tamaño fijo de la cabecera `.matrix` en bytes (Actualizado a 39 por TYPE_HASH).
+const HEADER_SIZE: usize = 39;
 
 /// Extrae de forma segura y veloz los datos binarios contiguos mapeados en el ejecutable.
 ///
 /// Realiza validación completa de cabecera física (magia, endianness, versión, truncado)
 /// antes de delegar la deserialización a Bincode con la endianness nativa del hardware.
-///
-/// # Seguridad
-///
-/// El llamante debe garantizar que `matrix_bytes` apunta a memoria válida y alineada
-/// de al menos `HEADER_SIZE` bytes de longitud. Esta función es invocada exclusivamente
-/// desde `Mold::cast()` tras verificar la existencia de `BAKED_TEMPLATE`.
-pub unsafe fn cast_from_matrix<T>(matrix_bytes: &[u8]) -> Result<T, MatrixError>
+pub fn cast_from_matrix<T>(matrix_bytes: &[u8]) -> Result<T, MatrixError>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -91,7 +78,8 @@ where
         u64::from_ne_bytes(buf)
     };
 
-    let payload_len = read_u64_native(23) as usize;
+    // Ajustado el índice de lectura del payload de 23 a 31 por el desplazamiento del hash
+    let payload_len = read_u64_native(31) as usize;
     let payload_end = HEADER_SIZE + payload_len;
 
     // Validar que el payload no esté truncado
@@ -101,10 +89,9 @@ where
 
     let payload = &matrix_bytes[HEADER_SIZE..payload_end];
 
-
     bincode_options()
-    .deserialize(payload)
-    .map_err(|_| MatrixError::DeserializationFailed)
+        .deserialize(payload)
+        .map_err(|_| MatrixError::DeserializationFailed)
 }
 
 pub fn bincode_options() -> impl bincode::Options {
@@ -126,41 +113,36 @@ mod tests {
 
     #[test]
     fn validar_reconstitucion_local_posix() {
-        // 1. Creamos el objeto nativo
         let objeto = EstructuraPrueba {
             texto: "Datos_Congelados_Nativos".to_string(),
             numero: 1337,
         };
 
-        // 2. Serializamos el payload usando bincode con la endianness del hardware actual
         use bincode::Options;
         let payload = bincode::options()
-            .with_little_endian() // Asumimos x86_64 / ARM64 estándar de desarrollo
+            .with_little_endian()
             .serialize(&objeto)
             .unwrap();
 
-        // 3. Esculpimos manualmente la cabecera física definitiva de 31 bytes
+        // Esculpimos la nueva cabecera física definitiva de 39 bytes
         let mut matriz_artesanal = Vec::new();
         matriz_artesanal.extend_from_slice(b"MATR"); // MAGIC (4B)
         matriz_artesanal.push(0x01); // ENDIAN MARK: LE (1B)
         matriz_artesanal.extend_from_slice(&1u16.to_le_bytes()); // VERSION (2B)
         matriz_artesanal.extend_from_slice(&11111u64.to_le_bytes()); // AST HASH (8B)
         matriz_artesanal.extend_from_slice(&22222u64.to_le_bytes()); // DEP HASH (8B)
+        matriz_artesanal.extend_from_slice(&33333u64.to_le_bytes()); // TYPE HASH (8B) [NUEVO]
         matriz_artesanal.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // PAYLOAD LEN (8B)
 
-        // Concatener los datos moleculares
         matriz_artesanal.extend_from_slice(&payload);
 
-        // 4. Invocamos al runtime en aislamiento total
-        unsafe {
-            let resultado: Result<EstructuraPrueba, MatrixError> =
-                cast_from_matrix(&matriz_artesanal);
+        // Llamada 100% segura sin bloques unsafe
+        let resultado: Result<EstructuraPrueba, MatrixError> = cast_from_matrix(&matriz_artesanal);
 
-            assert!(resultado.is_ok(), "El runtime rechazó la matriz local");
-            let objeto_fundido = resultado.unwrap();
+        assert!(resultado.is_ok(), "El runtime rechazó la matriz local");
+        let objeto_fundido = resultado.unwrap();
 
-            assert_eq!(objeto_fundido.texto, "Datos_Congelados_Nativos");
-            assert_eq!(objeto_fundido.numero, 1337);
-        }
+        assert_eq!(objeto_fundido.texto, "Datos_Congelados_Nativos");
+        assert_eq!(objeto_fundido.numero, 1337);
     }
 }

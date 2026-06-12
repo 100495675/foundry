@@ -2,6 +2,6 @@
 name = "foundry-build"
 version = "1.0.0"
 edition = "2021"
-description = "Utilidades del script de compilación para el ecosistema foundry"
+description = "Script de compilación para foundry con soporte híbrido Debug/Release y check-cfg"
 
 [dependencies]

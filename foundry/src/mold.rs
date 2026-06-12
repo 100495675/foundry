@@ -23,14 +23,9 @@ where
     #[inline(always)]
     pub fn cast(&self) -> T {
         if let Some(matrix_bytes) = F::BAKED_TEMPLATE {
-            unsafe {
-                match cast_from_matrix::<T>(matrix_bytes) {
-                    Ok(objeto) => return objeto,
-                    Err(e) => panic!("foundry: cast_from_matrix falló: {:?}", e),
-                }
-                /*if let Ok(objeto) = cast_from_matrix::<T>(matrix_bytes) {
-                    return objeto;
-                }*/
+            match cast_from_matrix::<T>(matrix_bytes) {
+                Ok(objeto) => return objeto,
+                Err(e) => panic!("foundry: cast_from_matrix falló: {:?}", e),
             }
         }
         F::execute()
@@ -41,8 +36,6 @@ where
         F::BAKED_TEMPLATE.is_some()
     }
 }
-
-// Clone, Copy, Debug sin cambios
 
 impl<F> Clone for Mold<F> {
     fn clone(&self) -> Self {
