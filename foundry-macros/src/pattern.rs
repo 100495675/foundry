@@ -6,10 +6,12 @@ use syn::{parse_macro_input, ItemFn, ReturnType};
 
 pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
+
     let name = &input.sig.ident;
     let vis = &input.vis;
     let body = &input.block;
     let attrs = &input.attrs;
+    let sig = &input.sig;
 
     let output_type: syn::Type = match &input.sig.output {
         ReturnType::Type(_, ty) => *ty.clone(),
@@ -23,11 +25,10 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let ast_hash = ast_hasher.finish();
 
     let dep_hash = compute_dependency_hash();
-    let raw_name = syn::Ident::new(&format!("__foundry_raw_{}", name), name.span());
     let test_capture_name =
         syn::Ident::new(&format!("__foundry_capture_for_{}", name), name.span());
+    let wrapper_trait_name = syn::Ident::new(&format!("__FoundryTrait_{}", name), name.span());
 
-    // Calcular el TYPE_HASH de forma determinista en tiempo de macro
     let type_str = quote!(#output_type).to_string().replace(" ", "");
     let type_bytes = type_str.as_bytes();
     let mut type_hash = 0xcbf29ce484222325u64;
@@ -36,7 +37,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         type_hash = type_hash.wrapping_mul(0x100000001b3u64);
     }
 
-    // --- 1. ESCÁNER DE COMPILACIÓN (target/foundry_data) ---
+    // --- 1. ESCÁNER DE COMPILACIÓN target/foundry_data ---
     let mut matrix_bytes_token = quote! { None };
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let matrix_path = std::path::Path::new(&manifest_dir)
@@ -63,43 +64,29 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // --- 2. EXPANSIÓN SINTÁCTICA ---
+    // --- 2. EXPANSIÓN SINTÁCTICA CON RECEPTOR POR REFERENCIA ---
     let expanded = quote! {
-        #[inline(never)]
         #(#attrs)*
-        #vis fn #raw_name() -> #output_type {
-            #body
-        }
+        #vis #sig #body
 
+        // Trait de extensión local para evitar la orfandad
         #[allow(non_camel_case_types)]
-        #[derive(Copy, Clone)]
-        #vis struct #name;
-
-        impl ::foundry::Pattern for #name {
-            type Output = #output_type;
-            const AST_HASH: u64 = #ast_hash;
-            const DEPENDENCY_HASH: u64 = #dep_hash;
-            const TYPE_HASH: u64 = #type_hash;
-
-            const BAKED_TEMPLATE: Option<&'static [u8]> = {
-                #[cfg(foundry_baked)]
-                { #matrix_bytes_token }
-                #[cfg(not(foundry_baked))]
-                { None }
-            };
-
-            #[inline(always)]
-            fn execute() -> Self::Output {
-                #raw_name()
-            }
+        #[doc(hidden)]
+        pub trait #wrapper_trait_name {
+            fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]>;
         }
 
-        impl ::std::ops::Deref for #name {
-            type Target = fn() -> #output_type;
+        // Lo implementamos sobre el puntero plano, pero el método recibe `&self`.
+        // Esto encaja milimétricamente con la llamada `(&ptr_funcion)` de la macro `mold!`.
+        impl #wrapper_trait_name for fn() -> #output_type {
             #[inline(always)]
-            fn deref(&self) -> &Self::Target {
-                static TARGET_PTR: fn() -> #output_type = #raw_name;
-                &TARGET_PTR
+            fn __foundry_obtener_matriz(&self) -> Option<&'static [u8]> {
+                let ptr_actual = #name as fn() -> #output_type;
+                if *self as usize == ptr_actual as usize {
+                    #matrix_bytes_token
+                } else {
+                    None
+                }
             }
         }
 
@@ -109,13 +96,10 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         fn #test_capture_name() {
             use ::std::io::Write as _;
             use ::foundry::internal::bincode::Options as _;
-            use ::foundry::Pattern as _;
 
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
             let carpeta = std::path::Path::new(&manifest).join("target").join("foundry_data");
             let ruta_matrix = carpeta.join(format!("{}.matrix", stringify!(#name)));
-
-            let current_type_hash = <#name as ::foundry::Pattern>::TYPE_HASH;
 
             if let Ok(bytes) = std::fs::read(&ruta_matrix) {
                 if bytes.len() >= 39 {
@@ -127,13 +111,13 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     type_buf.copy_from_slice(&bytes[23..31]);
                     let saved_type = u64::from_le_bytes(type_buf);
 
-                    if saved_ast == #ast_hash && saved_type == current_type_hash {
-                        return; // Caché vigente dentro de target/, abortar re-captura
+                    if saved_ast == #ast_hash && saved_type == #type_hash {
+                        return;
                     }
                 }
             }
 
-            let objeto = #raw_name();
+            let objeto = #name();
             let payload = ::foundry::internal::bincode_options()
                 .serialize(&objeto)
                 .unwrap();
@@ -145,7 +129,7 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             file.write_all(&1u16.to_le_bytes()).unwrap();
             file.write_all(&#ast_hash.to_le_bytes()).unwrap();
             file.write_all(&#dep_hash.to_le_bytes()).unwrap();
-            file.write_all(&current_type_hash.to_le_bytes()).unwrap();
+            file.write_all(&#type_hash.to_le_bytes()).unwrap();
             file.write_all(&(payload.len() as u64).to_le_bytes()).unwrap();
             file.write_all(&payload).unwrap();
         }
