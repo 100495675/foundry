@@ -1,7 +1,7 @@
 pub fn forge() {
-    println!("cargo:rustc-check-cfg=cfg(foundry_baked)");
+    println!("cargo:rustc-check-cfg=cfg(foundry_forged)");
     println!("cargo:rustc-check-cfg=cfg(foundry_capture_mode)");
-    println!("cargo:rerun-if-env-changed=FOUNDRY_BAKE");
+    println!("cargo:rerun-if-env-changed=FOUNDRY_FORGE");
 
     if std::env::var("FOUNDRY_CAPTURE_PASS").is_ok() {
         return;
@@ -10,11 +10,11 @@ pub fn forge() {
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let es_release = profile == "release";
 
-    let bake_forzado = std::env::var("FOUNDRY_BAKE")
+    let forge_forzado = std::env::var("FOUNDRY_FORGE")
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    if !es_release && !bake_forzado {
+    if !es_release && !forge_forzado {
         println!("cargo:rerun-if-changed=src/");
         return;
     }
@@ -59,7 +59,7 @@ pub fn forge() {
             .join("foundry_data");
 
         println!("cargo:rerun-if-changed={}", ruta_datos.to_str().unwrap());
-        println!("cargo:rustc-cfg=foundry_baked");
+        println!("cargo:rustc-cfg=foundry_foged");
     } else {
         println!("cargo:warning=foundry: la fase de captura falló o no encontró tests.");
     }
