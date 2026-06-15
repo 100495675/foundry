@@ -3,10 +3,8 @@ use std::io::Write as _;
 
 pub fn forge() {
     println!("cargo:rustc-check-cfg=cfg(foundry_forged)");
-    println!("cargo:rerun-if-env-changed=FOUNDRY_FORGE");
-    println!("cargo:rerun-if-env-changed=FOUNDRY_FORCE_REGEN");
 
-    // Evitamos bucles recursivos infinitos cuando el Cargo hijo despierte
+    // 1. Evitamos bucles recursivos infinitos cuando el Cargo hijo despierte
     if std::env::var("FOUNDRY_CAPTURE_PASS").is_ok() {
         return;
     }
@@ -15,33 +13,65 @@ pub fn forge() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap();
 
+    // Rastreamos la carpeta de código de la aplicación
+    let src_dir = std::path::Path::new(&manifest_dir).join("src");
+    println!("cargo:rerun-if-changed={}", src_dir.to_str().unwrap());
+
     let final_data_dir = std::path::Path::new(&manifest_dir)
         .join("target")
         .join("foundry_data");
 
-    // Monitoreamos la carpeta de datos local de la aplicación
     println!(
         "cargo:rerun-if-changed={}",
         final_data_dir.to_str().unwrap()
     );
 
-    // ⚡ BYPASS DE REGEN EN BUILD:
-    // Comprobamos si ya existen archivos `.matrix` generados previamente.
-    // Si la caché existe y NO se ha pedido una regeneración forzada, nos saltamos el test hijo.
-    let mut tiene_cache = false;
-    if final_data_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&final_data_dir) {
-            tiene_cache = entries
-                .flatten()
-                .any(|e| e.path().extension().map_or(false, |ext| ext == "matrix"));
+    // 2. DETECTOR DE MODIFICACIONES POR HARDWARE (MARCAS DE TIEMPO)
+    // Buscamos la fecha de modificación más reciente de cualquier archivo de código fuente
+    let mut ultima_modificacion_src = std::time::SystemTime::UNIX_EPOCH;
+    if let Ok(entries) = std::fs::read_dir(&src_dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().map_or(false, |ext| ext == "rs") {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(mod_time) = meta.modified() {
+                        if mod_time > ultima_modificacion_src {
+                            ultima_modificacion_src = mod_time;
+                        }
+                    }
+                }
+            }
         }
     }
 
-    let forzar_regen = std::env::var("FOUNDRY_FORCE_REGEN").is_ok();
+    // Buscamos la fecha de modificación del archivo .matrix más viejo en el disco
+    let mut tiene_cache = false;
+    let mut ultima_modificacion_cache = std::time::SystemTime::now();
+
+    if final_data_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&final_data_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "matrix") {
+                    tiene_cache = true;
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mod_time) = meta.modified() {
+                            if mod_time < ultima_modificacion_cache {
+                                ultima_modificacion_cache = mod_time;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 🔄 INVALIDACIÓN AUTOMÁTICA COHERENTE:
+    // Si la última edición de tu código fuente es MÁS NUEVA que la caché guardada,
+    // significa que el usuario ha cambiado un número o una lógica. Forzamos la regeneración.
+    let codigo_ha_cambiado = ultima_modificacion_src > ultima_modificacion_cache;
     let mut hijo_exitoso = true;
 
-    if !tiene_cache || forzar_regen {
-        // Solo entramos aquí si es la primera compilación limpia o si pides reconstruir
+    if !tiene_cache || codigo_ha_cambiado {
         let capture_target_dir = std::path::Path::new(&out_dir).join("foundry_capture_target");
         std::fs::create_dir_all(&final_data_dir).unwrap();
 
@@ -77,7 +107,7 @@ pub fn forge() {
         }
     }
 
-    // Generación del archivo del mapa estático en el OUT_DIR
+    // 3. INYECCIÓN DEL MAPA ALINEADO A 8 BYTES
     let env_file_path = std::path::Path::new(&out_dir).join("foundry_env.rs");
     let mut file = std::fs::File::create(&env_file_path).unwrap();
 
@@ -123,7 +153,6 @@ pub fn forge() {
 
     file.write_all(code.as_bytes()).unwrap();
 
-    // Activamos la optimización estática si tenemos datos válidos en el mapa
     if hijo_exitoso && cache_ready {
         println!("cargo:rustc-cfg=foundry_forged");
     }
