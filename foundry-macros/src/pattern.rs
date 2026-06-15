@@ -1,7 +1,5 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use syn::{parse_macro_input, ItemFn, ReturnType};
 
 pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -18,42 +16,41 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Default => syn::parse_quote!(()),
     };
 
-    // 🛠️ RESTAURACIÓN DE METADATOS 1: Calcular hash estático del AST de la función
-    let body_tokens = quote!(#body);
-    let body_str = body_tokens.to_string();
-    let mut ast_hasher = DefaultHasher::new();
-    body_str.hash(&mut ast_hasher);
-    let ast_hash = ast_hasher.finish();
+    // Algoritmo FNV-1a estático para el name_hash basado en el Identificador Inmune
+    let name_str = name.to_string();
+    let mut name_hash = 0xcbf29ce484222325u64;
+    for &b in name_str.as_bytes() {
+        name_hash ^= b as u64;
+        name_hash = name_hash.wrapping_mul(0x100000001b3u64);
+    }
 
-    // 🛠️ RESTAURACIÓN DE METADATOS 2: Calcular hash del tipo de retorno (FNV-1a simplificado)
+    // Algoritmo FNV-1a estático para el type_hash
     let type_str = quote!(#output_type).to_string().replace(" ", "");
-    let type_bytes = type_str.as_bytes();
     let mut type_hash = 0xcbf29ce484222325u64;
-    for &b in type_bytes {
+    for &b in type_str.as_bytes() {
         type_hash ^= b as u64;
         type_hash = type_hash.wrapping_mul(0x100000001b3u64);
     }
 
     let test_capture_name =
         syn::Ident::new(&format!("__foundry_capture_for_{}", name), name.span());
-
     let wrapper_struct_name = syn::Ident::new(&format!("__FoundryWrapper_{}", name), name.span());
+
+    // Trait local único por función para el descubrimiento directo por Autoref
     let discovery_trait_name =
-        syn::Ident::new(&format!("__FoundryDiscovery_{}", name), name.span());
+        syn::Ident::new(&format!("__FoundryLocalDiscovery_{}", name), name.span());
 
     let expanded = quote! {
         #(#attrs)*
         #vis #sig #body
 
-        // 1. Tipo local único para esquivar la regla de orfandad
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
         pub struct #wrapper_struct_name;
 
-        // 2. Implementación inherente libre de traits y restricciones
         impl #wrapper_struct_name {
             #[inline(always)]
-            pub fn __foundry_get_matrix(&self) -> Option<&'static [u8]> {
+            pub fn __foundry_get_matrix_live(&self) -> Option<&'static [u8]> {
                 static CACHE: ::std::sync::OnceLock<Option<&'static [u8]>> = ::std::sync::OnceLock::new();
 
                 *CACHE.get_or_init(|| {
@@ -71,16 +68,36 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     None
                 })
             }
+
+            #[inline(always)]
+            pub fn __foundry_metadata(&self) -> ::foundry::core::PatternMetadata {
+                ::foundry::core::PatternMetadata {
+                    name_hash: #name_hash, // 🛠️ CORRECCIÓN: Campo real de foundry-core
+                    type_hash: #type_hash,
+                    payload_len: 0,
+                    reserved: 0,
+                    magic: *::foundry::core::MATRIX_MAGIC,
+                    schema_ver: 1,
+                    version: ::foundry::core::MATRIX_VERSION,
+                    padding: 0,
+                }
+            }
         }
 
-        // 3. Extensión local acoplada al puntero primitivo usando el token precalculado
+        // El puente de descubrimiento por Autoref local
         #[allow(non_camel_case_types)]
-        #[doc(hidden)]
         pub trait #discovery_trait_name {
-            fn __foundry_discover(&self) -> #wrapper_struct_name { #wrapper_struct_name }
+            type Wrapper;
+            fn __foundry_extract_wrapper(&self) -> Self::Wrapper;
         }
 
-        impl #discovery_trait_name for fn() -> #output_type {}
+        impl #discovery_trait_name for &fn() -> #output_type {
+            type Wrapper = #wrapper_struct_name;
+            #[inline(always)]
+            fn __foundry_extract_wrapper(&self) -> Self::Wrapper {
+                #wrapper_struct_name
+            }
+        }
 
         #[cfg(test)]
         #[test]
@@ -101,16 +118,20 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             ::std::fs::create_dir_all(&data_dir).expect("foundry: No se pudo crear el directorio de captura de datos");
             let mut file = ::std::fs::File::create(&matrix_path).expect("foundry: No se pudo crear el archivo de matriz");
 
-            // ESCRITURA DE CABECERA ALINEADA (Total: 40 Bytes con el padding de hardware)
-            file.write_all(b"MATR").unwrap();                              // 4 bytes
-            file.write_all(&[0x02]).unwrap();                             // 1 byte
-            file.write_all(&1u16.to_le_bytes()).unwrap();                 // 2 bytes
-            file.write_all(&#ast_hash.to_le_bytes()).unwrap();            // 8 bytes
-            file.write_all(&0u64.to_le_bytes()).unwrap();                 // 8 bytes
-            file.write_all(&#type_hash.to_le_bytes()).unwrap();           // 8 bytes
-            file.write_all(&(payload.len() as u64).to_le_bytes()).unwrap(); // 8 bytes
-            file.write_all(&[0x00]).unwrap();                             // 1 byte de padding físico
+            let header = ::foundry::core::PatternMetadata {
+                name_hash: #name_hash, // 🛠️ CORRECCIÓN: Campo real de foundry-core
+                type_hash: #type_hash,
+                payload_len: payload.len() as u64,
+                reserved: 0,
+                magic: *::foundry::core::MATRIX_MAGIC,
+                schema_ver: 1,
+                version: ::foundry::core::MATRIX_VERSION,
+                padding: 0,
+            };
 
+            let header_bytes: &[u8; 40] = unsafe { &*(&header as *const ::foundry::core::PatternMetadata as *const [u8; 40]) };
+
+            file.write_all(header_bytes).unwrap();
             file.write_all(&payload).expect("foundry: Error al escribir los bytes serializados en disco");
         }
     };

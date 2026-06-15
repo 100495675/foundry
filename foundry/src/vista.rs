@@ -1,51 +1,54 @@
-use foundry_core::MATRIX_HEADER_SIZE;
-use rkyv::validation::validators::DefaultValidator;
-use std::marker::PhantomData;
+use foundry_core::PatternMetadata;
 
-pub enum Pipeline<T: rkyv::Archive> {
-    Forged(&'static [u8], PhantomData<T>),
-    Live(Vec<u8>, PhantomData<T>),
+#[derive(Clone)]
+pub enum Pipeline<R: ::rkyv::Archive> {
+    Forged(&'static [u8], PatternMetadata, std::marker::PhantomData<R>),
+    Live(Vec<u8>, std::marker::PhantomData<R>),
 }
 
-impl<T: rkyv::Archive + 'static> Pipeline<T>
+impl<R: ::rkyv::Archive> Pipeline<R>
 where
-    rkyv::Archived<T>: for<'b> rkyv::CheckBytes<DefaultValidator<'b>> + 'static,
+    R::Archived: 'static,
 {
     #[inline(always)]
-    pub fn map<U, F>(self, f: F) -> U
+    pub fn map<F, T>(&self, f: F) -> T
     where
-        F: FnOnce(&rkyv::Archived<T>) -> U,
+        F: FnOnce(&R::Archived) -> T,
     {
-        let archived_t = match &self {
-            Pipeline::Forged(bytes, _) => {
-                // Ahora el offset salta exactamente 40 bytes, respetando el padding de hardware
-                let payload = &bytes[MATRIX_HEADER_SIZE..];
-
-                #[cfg(debug_assertions)]
-                {
-                    rkyv::check_archived_root::<T>(payload).expect(
-                        "foundry: Corrupción estructural detectada en la sección .rodata forjada",
-                    )
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    unsafe { rkyv::archived_root::<T>(payload) }
-                }
+        match self {
+            Pipeline::Forged(bytes, _, _) => {
+                let payload_bytes = &bytes[40..];
+                let archived = unsafe { ::rkyv::archived_root::<R>(payload_bytes) };
+                f(archived)
             }
             Pipeline::Live(bytes, _) => {
-                // El carril live no lleva la cabecera del archivo en disco, opera directo
-                #[cfg(debug_assertions)]
-                {
-                    rkyv::check_archived_root::<T>(bytes)
-                        .expect("foundry: Corrupción estructural detectada en la rampa de memoria dinámica (Live)")
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    unsafe { rkyv::archived_root::<T>(bytes) }
-                }
+                let payload_bytes = &bytes[..];
+                let archived = unsafe { ::rkyv::archived_root::<R>(payload_bytes) };
+                f(archived)
             }
-        };
+        }
+    }
+}
 
-        f(archived_t)
+#[inline(always)]
+pub fn validar_matriz_auditoria(bytes: &[u8], expected_meta: &PatternMetadata) {
+    if bytes.len() < 40 {
+        panic!("foundry: Violación física. Tamaño de buffer insuficiente para cabecera densa.");
+    }
+
+    let header_bytes: &[u8; 40] = unsafe { &*(bytes.as_ptr() as *const [u8; 40]) };
+    let bin_header = unsafe { &*(header_bytes.as_ptr() as *const PatternMetadata) };
+
+    if bin_header.magic != expected_meta.magic {
+        panic!("foundry: Fallo de firma mágica de hardware corrupta.");
+    }
+    if bin_header.name_hash != expected_meta.name_hash {
+        panic!("foundry: Violación de identidad de función. El name_hash no coincide.");
+    }
+    if bin_header.type_hash != expected_meta.type_hash {
+        panic!("foundry: Violación estructural. El layout del tipo de retorno ha mutado.");
+    }
+    if bin_header.version != expected_meta.version {
+        panic!("foundry: Conflicto de versión del compilador de matrices.");
     }
 }
