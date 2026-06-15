@@ -8,7 +8,6 @@ where
     T: rkyv::Archive,
     rkyv::Archived<T>: for<'a> rkyv::CheckBytes<DefaultValidator<'a>>,
 {
-    // Cambiamos el offset a 40 bytes para absorber el padding de alineación de hardware
     let payload = &bytes[40..];
 
     #[cfg(debug_assertions)]
@@ -31,4 +30,12 @@ pub trait FoundryFallbackRouter {
     }
 }
 
-impl<T> FoundryFallbackRouter for &&fn() -> T {}
+#[doc(hidden)]
+pub struct DefaultRouter;
+
+impl FoundryFallbackRouter for DefaultRouter {
+    #[inline(always)]
+    fn __foundry_get_matrix(&self, _target_ptr: usize) -> Option<&'static [u8]> {
+        None
+    }
+}

@@ -13,6 +13,22 @@ pub fn forge() {
         .map(|v| v == "1")
         .unwrap_or(false);
 
+    // 🏎️ DETECCIÓN TEMPRANA DE CACHÉ
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("Missing CARGO_MANIFEST_DIR");
+    let final_data_dir = std::path::Path::new(&manifest_dir)
+        .join("target")
+        .join("foundry_data");
+    let data_path = final_data_dir.join("load_massive_array.matrix");
+
+    // Si el archivo ya existe porque una compilación previa lo generó,
+    // nos saltamos el subproceso de pruebas completamente, incluso en release o forced.
+    if data_path.exists() {
+        println!("cargo:rerun-if-changed={}", data_path.to_str().unwrap());
+        println!("cargo:rustc-cfg=foundry_forged");
+        return;
+    }
+
+    // Si no existe, evaluamos si debemos forzar la creación
     if !is_release && !forge_forced {
         println!("cargo:rerun-if-changed=src/");
         return;
@@ -21,9 +37,10 @@ pub fn forge() {
     println!("cargo:rerun-if-changed=src/");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("Missing CARGO_MANIFEST_DIR");
     let out_dir = std::env::var("OUT_DIR").expect("Missing OUT_DIR");
     let capture_target_dir = std::path::Path::new(&out_dir).join("foundry_capture_target");
+
+    std::fs::create_dir_all(&final_data_dir).unwrap();
 
     let mut command = std::process::Command::new("cargo");
     command
@@ -35,8 +52,8 @@ pub fn forge() {
             "__foundry_capture_for_",
         ])
         .current_dir(&manifest_dir)
-        .current_dir(&manifest_dir)
         .env("FOUNDRY_CAPTURE_PASS", "1")
+        .env("FOUNDRY_OUT_DIR_INJECT", final_data_dir.to_str().unwrap())
         .env("RUSTFLAGS", "--cfg foundry_capture_mode");
 
     command.env_remove("CARGO_MAKEFLAGS");
@@ -48,10 +65,6 @@ pub fn forge() {
         .expect("Critical failure running foundry compiler capture step");
 
     if status.success() {
-        let data_path = std::path::Path::new(&manifest_dir)
-            .join("target")
-            .join("foundry_data");
-
         println!("cargo:rerun-if-changed={}", data_path.to_str().unwrap());
         println!("cargo:rustc-cfg=foundry_forged");
     } else {
