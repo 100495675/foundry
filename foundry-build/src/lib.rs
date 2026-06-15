@@ -1,111 +1,108 @@
+// foundry-build/src/lib.rs
 use std::io::Write as _;
 
 pub fn forge() {
-    // 1. Registramos formalmente los cfgs personalizados para eliminar los warnings del compilador
     println!("cargo:rustc-check-cfg=cfg(foundry_forged)");
-    println!("cargo:rustc-check-cfg=cfg(foundry_capture_mode)");
     println!("cargo:rerun-if-env-changed=FOUNDRY_FORGE");
+    println!("cargo:rerun-if-env-changed=FOUNDRY_FORCE_REGEN");
 
+    // Evitamos bucles recursivos infinitos cuando el Cargo hijo despierte
     if std::env::var("FOUNDRY_CAPTURE_PASS").is_ok() {
         return;
     }
 
-    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let is_release = profile == "release";
-    let forge_forced = std::env::var("FOUNDRY_FORGE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap();
 
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("foundry: Falta CARGO_MANIFEST_DIR");
-    let out_dir = std::env::var("OUT_DIR").expect("foundry: Falta la variable OUT_DIR");
     let final_data_dir = std::path::Path::new(&manifest_dir)
         .join("target")
         .join("foundry_data");
 
+    // Monitoreamos la carpeta de datos local de la aplicación
     println!(
         "cargo:rerun-if-changed={}",
-        final_data_dir
-            .to_str()
-            .expect("foundry: Path de datos inválido")
+        final_data_dir.to_str().unwrap()
     );
 
-    let cache_ready = final_data_dir.exists()
-        && std::fs::read_dir(&final_data_dir)
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false);
-
-    if cache_ready {
-        write_env_injection_file(&out_dir, &final_data_dir);
-        println!("cargo:rustc-cfg=foundry_forged");
-        return;
+    // ⚡ BYPASS DE REGEN EN BUILD:
+    // Comprobamos si ya existen archivos `.matrix` generados previamente.
+    // Si la caché existe y NO se ha pedido una regeneración forzada, nos saltamos el test hijo.
+    let mut tiene_cache = false;
+    if final_data_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&final_data_dir) {
+            tiene_cache = entries
+                .flatten()
+                .any(|e| e.path().extension().map_or(false, |ext| ext == "matrix"));
+        }
     }
 
-    if !is_release && !forge_forced {
-        write_env_injection_file(&out_dir, &final_data_dir);
-        println!("cargo:rerun-if-changed=src/");
-        return;
+    let forzar_regen = std::env::var("FOUNDRY_FORCE_REGEN").is_ok();
+    let mut hijo_exitoso = true;
+
+    if !tiene_cache || forzar_regen {
+        // Solo entramos aquí si es la primera compilación limpia o si pides reconstruir
+        let capture_target_dir = std::path::Path::new(&out_dir).join("foundry_capture_target");
+        std::fs::create_dir_all(&final_data_dir).unwrap();
+
+        let mut command = std::process::Command::new("cargo");
+        command
+            .args(&[
+                "test",
+                "-p",
+                &pkg_name,
+                "--target-dir",
+                capture_target_dir.to_str().unwrap(),
+                "--",
+                "__foundry_capture_for_",
+            ])
+            .current_dir(&manifest_dir)
+            .env("FOUNDRY_CAPTURE_PASS", "1")
+            .env("FOUNDRY_OUT_DIR_INJECT", final_data_dir.to_str().unwrap());
+
+        command.env_remove("CARGO_MAKEFLAGS");
+        command.env_remove("MFLAGS");
+        command.env_remove("MAKEFLAGS");
+        command.env_remove("CARGO_RECURSION_LIMIT");
+
+        let status = command.status().unwrap_or_else(|_| {
+            panic!("foundry: Imposible lanzar el subproceso de captura");
+        });
+
+        hijo_exitoso = status.success();
+
+        if !hijo_exitoso {
+            let _ = std::fs::remove_dir_all(&final_data_dir);
+            std::fs::create_dir_all(&final_data_dir).unwrap();
+        }
     }
 
-    println!("cargo:rerun-if-changed=src/");
-    println!("cargo:rerun-if-changed=Cargo.lock");
-
-    let capture_target_dir = std::path::Path::new(&out_dir).join("foundry_capture_target");
-    std::fs::create_dir_all(&final_data_dir)
-        .expect("foundry: No se pudo crear el directorio definitivo de datos");
-
-    // 🛠️ CAPTURA AUTOMÁTICA NATIVA (Tu diseño original)
-    let mut command = std::process::Command::new("cargo");
-    command
-        .args(&[
-            "test",
-            "--target-dir",
-            capture_target_dir
-                .to_str()
-                .expect("foundry: Ruta temporal inválida"),
-            "--",
-            "__foundry_capture_for_",
-        ])
-        .current_dir(&manifest_dir)
-        .env("FOUNDRY_CAPTURE_PASS", "1")
-        .env("FOUNDRY_OUT_DIR_INJECT", final_data_dir.to_str().unwrap());
-
-    command.env_remove("CARGO_MAKEFLAGS");
-    command.env_remove("MFLAGS");
-    command.env_remove("MAKEFLAGS");
-
-    let status = command
-        .status()
-        .expect("foundry: Fallo crítico al ejecutar la captura automatizada");
-
-    write_env_injection_file(&out_dir, &final_data_dir);
-
-    if status.success() {
-        println!("cargo:rustc-cfg=foundry_forged");
-    } else {
-        println!("cargo:warning=foundry: Fase de captura omitida o sin tests asociados.");
-    }
-}
-
-fn write_env_injection_file(out_dir: &str, final_data_dir: &std::path::Path) {
-    let env_file_path = std::path::Path::new(out_dir).join("foundry_env.rs");
-    let mut file =
-        std::fs::File::create(&env_file_path).expect("foundry: No se pudo crear foundry_env.rs");
+    // Generación del archivo del mapa estático en el OUT_DIR
+    let env_file_path = std::path::Path::new(&out_dir).join("foundry_env.rs");
+    let mut file = std::fs::File::create(&env_file_path).unwrap();
 
     let mut map_branches = String::new();
+    let mut cache_ready = false;
 
     if final_data_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(final_data_dir) {
+        if let Ok(entries) = std::fs::read_dir(&final_data_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map_or(false, |ext| ext == "matrix") {
                     if let Some(func_name) = path.file_stem().and_then(|s| s.to_str()) {
                         if let Ok(bytes) = std::fs::read(&path) {
-                            let bytes_literal = format!("{:?}", bytes);
                             map_branches.push_str(&format!(
-                                "\"{}\" => Some(&{}),\n",
-                                func_name, bytes_literal
+                                "\"{}\" => {{ \
+                                    #[repr(align(8))]\
+                                    struct AlignedData([u8; {}]);\
+                                    static ALIGNED: AlignedData = AlignedData({:?});\
+                                    Some(&ALIGNED.0)\
+                                }},\n",
+                                func_name,
+                                bytes.len(),
+                                bytes
                             ));
+                            cache_ready = true;
                         }
                     }
                 }
@@ -113,7 +110,6 @@ fn write_env_injection_file(out_dir: &str, final_data_dir: &std::path::Path) {
         }
     }
 
-    // Corregido el duplicado estructural del match fallback
     let code = format!(
         "#[allow(dead_code)]\n\
         pub fn get_matrix_bytes(name: &str) -> Option<&'static [u8]> {{\n\
@@ -122,13 +118,13 @@ fn write_env_injection_file(out_dir: &str, final_data_dir: &std::path::Path) {
                 _ => None,\n\
             }}\n\
         }}",
-        if map_branches.is_empty() {
-            ""
-        } else {
-            &map_branches
-        }
+        map_branches
     );
 
-    file.write_all(code.as_bytes())
-        .expect("foundry: Error al escribir en foundry_env.rs");
+    file.write_all(code.as_bytes()).unwrap();
+
+    // Activamos la optimización estática si tenemos datos válidos en el mapa
+    if hijo_exitoso && cache_ready {
+        println!("cargo:rustc-cfg=foundry_forged");
+    }
 }

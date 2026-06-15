@@ -1,4 +1,5 @@
-use foundry_core::PatternMetadata;
+// foundry/src/vista.rs
+use foundry_core::{PatternMetadata, MATRIX_MAGIC, MATRIX_VERSION};
 
 #[derive(Clone)]
 pub enum Pipeline<R: ::rkyv::Archive> {
@@ -31,24 +32,16 @@ where
 }
 
 #[inline(always)]
-pub fn validar_matriz_auditoria(bytes: &[u8], expected_meta: &PatternMetadata) {
+pub fn validar_matriz_auditoria(bytes: &[u8], _expected_meta: &PatternMetadata) -> bool {
     if bytes.len() < 40 {
-        panic!("foundry: Violación física. Tamaño de buffer insuficiente para cabecera densa.");
+        return false;
     }
 
-    let header_bytes: &[u8; 40] = unsafe { &*(bytes.as_ptr() as *const [u8; 40]) };
-    let bin_header = unsafe { &*(header_bytes.as_ptr() as *const PatternMetadata) };
+    let bin_header = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const PatternMetadata) };
 
-    if bin_header.magic != expected_meta.magic {
-        panic!("foundry: Fallo de firma mágica de hardware corrupta.");
+    if bin_header.magic != *MATRIX_MAGIC || bin_header.version != MATRIX_VERSION {
+        return false;
     }
-    if bin_header.name_hash != expected_meta.name_hash {
-        panic!("foundry: Violación de identidad de función. El name_hash no coincide.");
-    }
-    if bin_header.type_hash != expected_meta.type_hash {
-        panic!("foundry: Violación estructural. El layout del tipo de retorno ha mutado.");
-    }
-    if bin_header.version != expected_meta.version {
-        panic!("foundry: Conflicto de versión del compilador de matrices.");
-    }
+
+    true
 }

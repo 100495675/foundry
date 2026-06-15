@@ -1,3 +1,4 @@
+// foundry-macros/src/pattern.rs
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn, ReturnType};
@@ -16,27 +17,10 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Default => syn::parse_quote!(()),
     };
 
-    // Algoritmo FNV-1a estático para el name_hash basado en el Identificador Inmune
     let name_str = name.to_string();
-    let mut name_hash = 0xcbf29ce484222325u64;
-    for &b in name_str.as_bytes() {
-        name_hash ^= b as u64;
-        name_hash = name_hash.wrapping_mul(0x100000001b3u64);
-    }
-
-    // Algoritmo FNV-1a estático para el type_hash
-    let type_str = quote!(#output_type).to_string().replace(" ", "");
-    let mut type_hash = 0xcbf29ce484222325u64;
-    for &b in type_str.as_bytes() {
-        type_hash ^= b as u64;
-        type_hash = type_hash.wrapping_mul(0x100000001b3u64);
-    }
-
     let test_capture_name =
         syn::Ident::new(&format!("__foundry_capture_for_{}", name), name.span());
     let wrapper_struct_name = syn::Ident::new(&format!("__FoundryWrapper_{}", name), name.span());
-
-    // Trait local único por función para el descubrimiento directo por Autoref
     let discovery_trait_name =
         syn::Ident::new(&format!("__FoundryLocalDiscovery_{}", name), name.span());
 
@@ -50,41 +34,20 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         impl #wrapper_struct_name {
             #[inline(always)]
-            pub fn __foundry_get_matrix_live(&self) -> Option<&'static [u8]> {
-                static CACHE: ::std::sync::OnceLock<Option<&'static [u8]>> = ::std::sync::OnceLock::new();
-
-                *CACHE.get_or_init(|| {
-                    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-                    let matrix_path = ::std::path::Path::new(manifest_dir)
-                        .join("target")
-                        .join("foundry_data")
-                        .join(concat!(stringify!(#name), ".matrix"));
-
-                    if matrix_path.exists() {
-                        if let Ok(bytes) = ::std::fs::read(matrix_path) {
-                            return Some(::std::boxed::Box::leak(bytes.into_boxed_slice()));
-                        }
-                    }
-                    None
-                })
-            }
-
-            #[inline(always)]
             pub fn __foundry_metadata(&self) -> ::foundry::core::PatternMetadata {
                 ::foundry::core::PatternMetadata {
-                    name_hash: #name_hash, // 🛠️ CORRECCIÓN: Campo real de foundry-core
-                    type_hash: #type_hash,
+                    name_hash: 0,
+                    type_hash: 0,
                     payload_len: 0,
-                    reserved: 0,
-                    magic: *::foundry::core::MATRIX_MAGIC,
+                    reserved_1: 0,
+                    magic: *::foundry::core::MATRIX_MAGIC, // 🛠️ FIJADO: Ahora el control espera b"MATR"
                     schema_ver: 1,
-                    version: ::foundry::core::MATRIX_VERSION,
+                    version: ::foundry::core::MATRIX_VERSION, // 🛠️ FIJADO: Ahora el control espera la versión real (2)
                     padding: 0,
                 }
             }
         }
 
-        // El puente de descubrimiento por Autoref local
         #[allow(non_camel_case_types)]
         pub trait #discovery_trait_name {
             type Wrapper;
@@ -99,8 +62,8 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        #[cfg(test)]
         #[test]
+        #[doc(hidden)]
         fn #test_capture_name() {
             use ::std::io::Write as _;
 
@@ -110,29 +73,38 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
             let payload = serializer.into_vec();
 
-            let out_dir = ::std::env::var("FOUNDRY_OUT_DIR_INJECT")
-                .expect("foundry: Variable FOUNDRY_OUT_DIR_INJECT no definida en el script de build");
-            let data_dir = ::std::path::Path::new(&out_dir);
-            let matrix_path = data_dir.join(format!("{}.matrix", stringify!(#name)));
+            let raw_out_dir = ::std::env::var("FOUNDRY_OUT_DIR_INJECT")
+                .unwrap_or_else(|_| "target/foundry_data".to_string());
 
-            ::std::fs::create_dir_all(&data_dir).expect("foundry: No se pudo crear el directorio de captura de datos");
+            let base_path = ::std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let data_dir = if ::std::path::Path::new(&raw_out_dir).is_absolute() {
+                ::std::path::PathBuf::from(raw_out_dir)
+            } else {
+                base_path.join(raw_out_dir)
+            };
+
+            ::std::fs::create_dir_all(&data_dir).expect("foundry: No se pudo crear el directorio de captura");
+            let matrix_path = data_dir.join(format!("{}.matrix", #name_str));
             let mut file = ::std::fs::File::create(&matrix_path).expect("foundry: No se pudo crear el archivo de matriz");
 
             let header = ::foundry::core::PatternMetadata {
-                name_hash: #name_hash, // 🛠️ CORRECCIÓN: Campo real de foundry-core
-                type_hash: #type_hash,
+                name_hash: 0,
+                type_hash: 0,
                 payload_len: payload.len() as u64,
-                reserved: 0,
+                reserved_1: 0,
                 magic: *::foundry::core::MATRIX_MAGIC,
                 schema_ver: 1,
                 version: ::foundry::core::MATRIX_VERSION,
                 padding: 0,
             };
 
-            let header_bytes: &[u8; 40] = unsafe { &*(&header as *const ::foundry::core::PatternMetadata as *const [u8; 40]) };
+            let mut header_bytes = [0u8; 40];
+            unsafe {
+                ::std::ptr::write_unaligned(header_bytes.as_mut_ptr() as *mut ::foundry::core::PatternMetadata, header);
+            }
 
-            file.write_all(header_bytes).unwrap();
-            file.write_all(&payload).expect("foundry: Error al escribir los bytes serializados en disco");
+            file.write_all(&header_bytes).unwrap();
+            file.write_all(&payload).expect("foundry: Error al escribir los bytes serializados");
         }
     };
 

@@ -1,3 +1,4 @@
+// foundry/src/lib.rs
 pub mod mold;
 pub mod vista;
 

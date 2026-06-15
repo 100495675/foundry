@@ -2,17 +2,26 @@
 
 #[macro_export]
 macro_rules! mold {
-    ($function:expr) => {{
+    ($function:ident) => {{
         let original_fn = $function;
         let function_ptr: fn() -> _ = original_fn;
+
+        #[cfg(test)]
+        mod __foundry_env_bridge {
+            #[allow(dead_code)]
+            pub fn get_matrix_bytes(_name: &str) -> Option<&'static [u8]> {
+                None
+            }
+        }
+
+        #[cfg(not(test))]
+        mod __foundry_env_bridge {
+            include!(concat!(env!("OUT_DIR"), "/foundry_env.rs"));
+        }
 
         #[allow(dead_code)]
         struct __FoundryFallbackWrapper;
         impl __FoundryFallbackWrapper {
-            #[inline(always)]
-            fn __foundry_get_matrix_live(&self) -> Option<&'static [u8]> {
-                None
-            }
             #[inline(always)]
             fn __foundry_metadata(&self) -> $crate::core::PatternMetadata {
                 $crate::core::PatternMetadata::default()
@@ -24,9 +33,6 @@ macro_rules! mold {
             fn __foundry_extract_wrapper(&self) -> __FoundryFallbackWrapper;
         }
 
-        // 🛠️ CORRECCIÓN DE PRIORIDAD DE AUTOREF:
-        // Implementamos el fallback para `&&&F`. Al requerir más ampersands,
-        // Rust siempre preferirá el trait de `pattern.rs` (que pide menos) si está presente.
         impl<F> __FoundryUniversalFallback for &&&F {
             #[inline(always)]
             fn __foundry_extract_wrapper(&self) -> __FoundryFallbackWrapper {
@@ -34,11 +40,7 @@ macro_rules! mold {
             }
         }
 
-        // Pasamos tres ampersands para activar la cadena de desempate en cascada
-        let matrix_bytes = {
-            let wrapper = (&&&function_ptr).__foundry_extract_wrapper();
-            wrapper.__foundry_get_matrix_live()
-        };
+        let matrix_bytes = __foundry_env_bridge::get_matrix_bytes(stringify!($function));
 
         let expected_meta = {
             let wrapper = (&&&function_ptr).__foundry_extract_wrapper();
@@ -57,14 +59,18 @@ macro_rules! mold {
             >,
         {
             if let Some(bytes) = matrix_bytes {
-                $crate::vista::validar_matriz_auditoria(bytes, &expected_meta);
-                $crate::vista::Pipeline::Forged(bytes, expected_meta, std::marker::PhantomData)
-            } else {
-                let live_data = _f();
-                let serialized_bytes =
-                    $crate::prelude::rkyv::to_bytes::<_, 256>(&live_data).unwrap();
-                $crate::vista::Pipeline::Live(serialized_bytes.to_vec(), std::marker::PhantomData)
+                if $crate::vista::validar_matriz_auditoria(bytes, &expected_meta) {
+                    return $crate::vista::Pipeline::Forged(
+                        bytes,
+                        expected_meta,
+                        std::marker::PhantomData,
+                    );
+                }
             }
+
+            let live_data = _f();
+            let serialized_bytes = $crate::prelude::rkyv::to_bytes::<_, 256>(&live_data).unwrap();
+            $crate::vista::Pipeline::Live(serialized_bytes.to_vec(), std::marker::PhantomData)
         }
 
         inferir_y_construir(function_ptr, matrix_bytes, expected_meta)
