@@ -2,14 +2,12 @@
 name = "foundry-macros"
 version = "2.0.0"
 edition = "2021"
-description = "Procedural macros for zero-copy binary state injection"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-foundry-core = { path = "../foundry-core" }
-syn = { version = "2.0", features = ["full", "parsing"] }
+# rkyv ELIMINADO de aquí. Mitiga tiempos de compilación inflados de la macro.
+syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-rkyv = { version = "0.7.44", features = ["validation"] }
