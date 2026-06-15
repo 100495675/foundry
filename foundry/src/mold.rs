@@ -3,28 +3,48 @@
 #[macro_export]
 macro_rules! mold {
     ($function:expr) => {{
-        // 1. Mantenemos la identidad exacta del ítem de función original para la inferencia
         let original_fn = $function;
-
-        // 2. Coaccionamos a puntero plano de forma higiénica para el Autoref de pattern.rs
         let function_ptr: fn() -> _ = original_fn;
 
-        // Extraemos los metadatos y bytes usando el puente por Autoref legítimo
+        #[allow(dead_code)]
+        struct __FoundryFallbackWrapper;
+        impl __FoundryFallbackWrapper {
+            #[inline(always)]
+            fn __foundry_get_matrix_live(&self) -> Option<&'static [u8]> {
+                None
+            }
+            #[inline(always)]
+            fn __foundry_metadata(&self) -> $crate::core::PatternMetadata {
+                $crate::core::PatternMetadata::default()
+            }
+        }
+
+        #[allow(non_camel_case_types)]
+        trait __FoundryUniversalFallback {
+            fn __foundry_extract_wrapper(&self) -> __FoundryFallbackWrapper;
+        }
+
+        // 🛠️ CORRECCIÓN DE PRIORIDAD DE AUTOREF:
+        // Implementamos el fallback para `&&&F`. Al requerir más ampersands,
+        // Rust siempre preferirá el trait de `pattern.rs` (que pide menos) si está presente.
+        impl<F> __FoundryUniversalFallback for &&&F {
+            #[inline(always)]
+            fn __foundry_extract_wrapper(&self) -> __FoundryFallbackWrapper {
+                __FoundryFallbackWrapper
+            }
+        }
+
+        // Pasamos tres ampersands para activar la cadena de desempate en cascada
         let matrix_bytes = {
-            let wrapper = (&&function_ptr).__foundry_extract_wrapper();
+            let wrapper = (&&&function_ptr).__foundry_extract_wrapper();
             wrapper.__foundry_get_matrix_live()
         };
 
         let expected_meta = {
-            let wrapper = (&&function_ptr).__foundry_extract_wrapper();
+            let wrapper = (&&&function_ptr).__foundry_extract_wrapper();
             wrapper.__foundry_metadata()
         };
 
-        // 3. LA SOLUCIÓN TÉCNICA LIMPIA (Inferencia unificada al instante):
-        // Creamos una pequeña función interna en el bloque que acepta la función original.
-        // Al usar la firma `fn() -> R` y devolver un `Pipeline<R>`, Rust se ve obligado a
-        // extraer matemáticamente el tipo de retorno exacto (ej. String o u64) y ligarlo
-        // a la estructura de datos final del Pipeline. Así el .map() sabrá el tipo real siempre.
         #[inline(always)]
         fn inferir_y_construir<R: $crate::prelude::rkyv::Archive>(
             _f: fn() -> R,
@@ -47,7 +67,6 @@ macro_rules! mold {
             }
         }
 
-        // Invocamos pasándole el puntero ya coaccionado para fijar de golpe los tipos del layout
         inferir_y_construir(function_ptr, matrix_bytes, expected_meta)
     }};
 }
