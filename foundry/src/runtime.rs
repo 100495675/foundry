@@ -22,20 +22,13 @@ where
     }
 }
 
-#[doc(hidden)]
-pub trait FoundryFallbackRouter {
-    #[inline(always)]
-    fn __foundry_get_matrix(&self, _target_ptr: usize) -> Option<&'static [u8]> {
-        None
-    }
-}
-
+// Estructura base para desvíos de funciones normales sin decorar
 #[doc(hidden)]
 pub struct DefaultRouter;
 
-impl FoundryFallbackRouter for DefaultRouter {
+impl DefaultRouter {
     #[inline(always)]
-    fn __foundry_get_matrix(&self, _target_ptr: usize) -> Option<&'static [u8]> {
+    pub fn __foundry_get_matrix(&self, _target_ptr: usize) -> Option<&'static [u8]> {
         None
     }
 }
