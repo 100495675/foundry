@@ -1,27 +1,28 @@
-use bincode::Options;
+use rkyv::check_archived_root;
+use rkyv::validation::validators::DefaultValidator;
 
-/// Standardized configuration for ultra-fast bincode deserialization.
 #[inline(always)]
 #[doc(hidden)]
-pub fn bincode_options() -> impl bincode::Options {
-    bincode::options()
-        .with_little_endian()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
+pub fn access_matrix<T>(bytes: &'static [u8]) -> &'static rkyv::Archived<T>
+where
+    T: rkyv::Archive,
+    rkyv::Archived<T>: for<'a> rkyv::CheckBytes<DefaultValidator<'a>>,
+{
+    // Cambiamos el offset a 40 bytes para absorber el padding de alineación de hardware
+    let payload = &bytes[40..];
+
+    #[cfg(debug_assertions)]
+    {
+        check_archived_root::<T>(payload)
+            .expect("foundry: Corrupted structural binary payload detected")
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        unsafe { rkyv::archived_root::<T>(payload) }
+    }
 }
 
-/// Extracts the binary payload by skipping the rigid foundry matrix header.
-#[inline(always)]
-#[doc(hidden)]
-pub fn cast_from_matrix<T: serde::de::DeserializeOwned>(
-    bytes: &'static [u8],
-) -> Result<T, bincode::Error> {
-    // Skip the 39 bytes of the rigid forge header (Magic, Hashes, Sizes)
-    let payload = &bytes[39..];
-    bincode_options().deserialize(payload)
-}
-
-/// Global fallback router trait for Autoref method resolution.
 #[doc(hidden)]
 pub trait FoundryFallbackRouter {
     #[inline(always)]
@@ -30,5 +31,4 @@ pub trait FoundryFallbackRouter {
     }
 }
 
-// Lowest priority fallback: applies to a reference of a reference of a flat function pointer.
 impl<T> FoundryFallbackRouter for &&fn() -> T {}

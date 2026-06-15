@@ -8,13 +8,12 @@ pub fn forge() {
     }
 
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let es_release = profile == "release";
-
-    let forge_forzado = std::env::var("FOUNDRY_FORGE")
+    let is_release = profile == "release";
+    let forge_forced = std::env::var("FOUNDRY_FORGE")
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    if !es_release && !forge_forzado {
+    if !is_release && !forge_forced {
         println!("cargo:rerun-if-changed=src/");
         return;
     }
@@ -22,17 +21,12 @@ pub fn forge() {
     println!("cargo:rerun-if-changed=src/");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("Falta CARGO_MANIFEST_DIR");
-    let out_dir = std::env::var("OUT_DIR").expect("Falta OUT_DIR");
-
-    // Directorio completamente aislado fuera del árbol estándar para evitar colisiones de Locks
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("Missing CARGO_MANIFEST_DIR");
+    let out_dir = std::env::var("OUT_DIR").expect("Missing OUT_DIR");
     let capture_target_dir = std::path::Path::new(&out_dir).join("foundry_capture_target");
 
-    // --- PURGA DE ENTORNO DE CARGO ---
-    // Eliminamos las variables con las que el Cargo padre controla al Cargo hijo.
-    // Al limpiar esto, el subproceso se cree que es un comando independiente en una terminal limpia.
-    let mut comando = std::process::Command::new("cargo");
-    comando
+    let mut command = std::process::Command::new("cargo");
+    command
         .args(&[
             "test",
             "--target-dir",
@@ -41,26 +35,28 @@ pub fn forge() {
             "__foundry_capture_for_",
         ])
         .current_dir(&manifest_dir)
+        .current_dir(&manifest_dir)
         .env("FOUNDRY_CAPTURE_PASS", "1")
         .env("RUSTFLAGS", "--cfg foundry_capture_mode");
 
-    // Purgamos banderas de concurrencia de Cargo para evitar que el hijo espere al padre
-    comando.env_remove("CARGO_MAKEFLAGS");
-    comando.env_remove("MFLAGS");
-    comando.env_remove("MAKEFLAGS");
+    command.env_remove("CARGO_MAKEFLAGS");
+    command.env_remove("MFLAGS");
+    command.env_remove("MAKEFLAGS");
 
-    let status = comando
+    let status = command
         .status()
-        .expect("Error crítico en la captura de foundry");
+        .expect("Critical failure running foundry compiler capture step");
 
     if status.success() {
-        let ruta_datos = std::path::Path::new(&manifest_dir)
+        let data_path = std::path::Path::new(&manifest_dir)
             .join("target")
             .join("foundry_data");
 
-        println!("cargo:rerun-if-changed={}", ruta_datos.to_str().unwrap());
-        println!("cargo:rustc-cfg=foundry_foged");
+        println!("cargo:rerun-if-changed={}", data_path.to_str().unwrap());
+        println!("cargo:rustc-cfg=foundry_forged");
     } else {
-        println!("cargo:warning=foundry: la fase de captura falló o no encontró tests.");
+        println!(
+            "cargo:warning=foundry: Capture phase skipped or found no automated layout tests."
+        );
     }
 }

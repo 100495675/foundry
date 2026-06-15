@@ -1,17 +1,17 @@
-use crate::runtime::cast_from_matrix;
+use crate::runtime::access_matrix;
+use rkyv::validation::validators::DefaultValidator;
+use rkyv::Deserialize;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-/// Internal infrastructure trait to statically resolve the evaluation
-/// of any pure executable logic (Function Items or function pointers) during fallback.
 pub trait Pour {
-    type Output;
+    type Output: rkyv::Archive;
     fn pour(&self) -> Self::Output;
 }
 
-// Universal Blanket Implementation for anything that satisfies `Fn() -> R + Copy`.
-// Seamlessly covers standard function pointers and clean Function Items without overlapping.
 impl<R, G> Pour for G
 where
     G: Fn() -> R + Copy,
+    R: rkyv::Archive,
 {
     type Output = R;
 
@@ -21,71 +21,99 @@ where
     }
 }
 
-/// Universal zero-cost runtime wrapper.
-///
-/// Occupies exactly 24 bytes on the Stack and is as lightweight as a primitive type.
-/// The `F` type mathematically maps the unique identity of the function in the foundry.
-pub struct Mold<F> {
+pub struct Mold<F, Target> {
     fallback_function: F,
     injected_bytes: Option<&'static [u8]>,
+    storage: AtomicPtr<Target>,
 }
 
-impl<F: Clone> Clone for Mold<F> {
+impl<F: Clone, Target> Clone for Mold<F, Target> {
     #[inline(always)]
     fn clone(&self) -> Self {
         Self {
             fallback_function: self.fallback_function.clone(),
             injected_bytes: self.injected_bytes,
+            // Clonamos el valor del puntero atómico actual de forma segura
+            storage: AtomicPtr::new(self.storage.load(Ordering::Relaxed)),
         }
     }
 }
 
-impl<F: Copy> Copy for Mold<F> {}
+// ELIMINADO: impl Copy for Mold. Se acabó el error E0204 para siempre.
 
-impl<F> Mold<F>
+impl<F, T> Mold<F, T>
 where
-    F: Pour + Copy,
-    <F as Pour>::Output: serde::de::DeserializeOwned,
+    F: Pour<Output = T> + Copy,
+    T: rkyv::Archive,
+    rkyv::Archived<T>: for<'a> rkyv::CheckBytes<DefaultValidator<'a>>
+        + rkyv::Deserialize<T, rkyv::Infallible>
+        + 'static,
 {
-    /// Internal constructor for zero-allocation on the Heap.
     #[inline(always)]
     #[doc(hidden)]
     pub const fn new_internal(fallback_function: F, injected_bytes: Option<&'static [u8]>) -> Self {
         Self {
             fallback_function,
             injected_bytes,
+            storage: AtomicPtr::new(std::ptr::null_mut()),
         }
     }
 
-    /// Deserializes from the static injected bytes (Forged Phase) or pours the original function (Dynamic Phase).
-    #[inline(always)]
-    pub fn cast(&self) -> <F as Pour>::Output {
-        if let Some(matrix_bytes) = self.injected_bytes {
-            match cast_from_matrix::<<F as Pour>::Output>(matrix_bytes) {
-                Ok(object) => return object,
-                Err(e) => panic!("foundry: cast_from_matrix failed: {:?}", e),
-            }
-        }
-
-        // Pours the original function: zero Box, zero vtable, 100% inlinable.
-        self.fallback_function.pour()
-    }
-
-    /// Strict binary guarantee: returns `true` only if the physical binary
-    /// carries the pre-calculated bytes injected from the `.matrix` file.
     #[inline(always)]
     pub const fn is_forged(&self) -> bool {
         self.injected_bytes.is_some()
     }
+
+    #[inline(always)]
+    pub fn cast(&self) -> &'static T {
+        let current_ptr = self.storage.load(Ordering::Acquire);
+        if !current_ptr.is_null() {
+            return unsafe { &*current_ptr };
+        }
+
+        let value = if let Some(matrix_bytes) = self.injected_bytes {
+            let archived = access_matrix::<T>(matrix_bytes);
+            archived.deserialize(&mut rkyv::Infallible).unwrap()
+        } else {
+            self.fallback_function.pour()
+        };
+
+        let leaked_ref = Box::leak(Box::new(value));
+        let allocated_ptr = leaked_ref as *mut T;
+
+        match self.storage.compare_exchange(
+            std::ptr::null_mut(),
+            allocated_ptr,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => leaked_ref,
+            Err(existing_ptr) => unsafe {
+                let _reclaimed_box = Box::from_raw(allocated_ptr);
+                &*existing_ptr
+            },
+        }
+    }
 }
 
-// --- SAFE ALGEBRAIC IDENTITY WITHOUT UB ---
-// We restrict strict equality to named function pointers (`Mold<fn() -> T>`).
-impl<T> PartialEq for Mold<fn() -> T> {
+impl<T> PartialEq for Mold<fn() -> T, T>
+where
+    T: rkyv::Archive,
+    rkyv::Archived<T>: for<'a> rkyv::CheckBytes<DefaultValidator<'a>>
+        + rkyv::Deserialize<T, rkyv::Infallible>
+        + 'static,
+{
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         std::ptr::fn_addr_eq(self.fallback_function, other.fallback_function)
     }
 }
 
-impl<T> Eq for Mold<fn() -> T> {}
+impl<T> Eq for Mold<fn() -> T, T>
+where
+    T: rkyv::Archive,
+    rkyv::Archived<T>: for<'a> rkyv::CheckBytes<DefaultValidator<'a>>
+        + rkyv::Deserialize<T, rkyv::Infallible>
+        + 'static,
+{
+}

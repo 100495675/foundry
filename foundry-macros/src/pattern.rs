@@ -37,7 +37,6 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         type_hash = type_hash.wrapping_mul(0x100000001b3u64);
     }
 
-    // --- TARGET/FOUNDRY_DATA COMPILATION SCANNER ---
     let mut matrix_bytes_token = quote! { None };
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let matrix_path = std::path::Path::new(&manifest_dir)
@@ -57,27 +56,33 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let saved_type_hash = u64::from_le_bytes(saved_type_bytes);
 
                     if saved_ast_hash == ast_hash && saved_type_hash == type_hash {
-                        matrix_bytes_token = quote! { Some(&[#(#bytes),*]) };
+                        let len = bytes.len() + 1;
+                        matrix_bytes_token = quote! {
+                            {
+                                #[repr(align(4))]
+                                struct AlignedBytes<const N: usize>([u8; N]);
+
+                                // Inyectamos el byte de alineación de hardware
+                                static ALIGNED_STATIC: AlignedBytes<#len> = AlignedBytes([0u8, #(#bytes),*]);
+                                Some(&ALIGNED_STATIC.0 as &[u8])
+                            }
+                        };
                     }
                 }
             }
         }
     }
 
-    // --- LOCAL EXTENSION TRAIT EXPANSION (NO OVERLAPPING) ---
     let expanded = quote! {
         #(#attrs)*
         #vis #sig #body
 
-        // Local extension trait unique per function item module scope
         #[allow(non_camel_case_types)]
         #[doc(hidden)]
         pub trait #wrapper_trait_name {
             fn __foundry_get_matrix(&self, target_ptr: usize) -> Option<&'static [u8]>;
         }
 
-        // Implemented specifically on the reference of the flat function pointer type.
-        // Each function item expands its own unique trait name, completely avoiding E0034.
         impl #wrapper_trait_name for &fn() -> #output_type {
             #[inline(always)]
             fn __foundry_get_matrix(&self, target_ptr: usize) -> Option<&'static [u8]> {
@@ -90,12 +95,10 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // --- AUTOMATED FOUNDRY CAPTURE TEST ---
         #[cfg(test)]
         #[test]
         fn #test_capture_name() {
             use ::std::io::Write as _;
-            use ::foundry::internal::bincode::Options as _;
 
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
             let data_dir = std::path::Path::new(&manifest).join("target").join("foundry_data");
@@ -118,14 +121,14 @@ pub fn pattern_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             let object = #name();
-            let payload = ::foundry::internal::bincode_options()
-                .serialize(&object)
-                .unwrap();
+            let serializer = ::foundry::internal::rkyv::to_bytes::<_, 256>(&object)
+                .expect("foundry: Failed to serialize matrix data via rkyv");
+            let payload = serializer.into_vec();
 
             std::fs::create_dir_all(&data_dir).unwrap();
             let mut file = std::fs::File::create(&matrix_path).unwrap();
             file.write_all(b"MATR").unwrap();
-            file.write_all(&[0x01]).unwrap();
+            file.write_all(&[0x02]).unwrap();
             file.write_all(&1u16.to_le_bytes()).unwrap();
             file.write_all(&#ast_hash.to_le_bytes()).unwrap();
             file.write_all(&#dep_hash.to_le_bytes()).unwrap();
